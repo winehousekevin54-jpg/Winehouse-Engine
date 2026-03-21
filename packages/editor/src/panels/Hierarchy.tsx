@@ -1,5 +1,5 @@
 import { useEditorStore } from '../store/editor';
-import { spawnCube, despawn, getSceneObjects } from '../bridge/EngineAPI';
+import { SpawnCubeCommand, DespawnCommand, syncScene } from '../commands';
 
 const PANEL: React.CSSProperties = {
   width: '100%',
@@ -31,23 +31,26 @@ export function Hierarchy() {
   const selectEntity = useEditorStore((s) => s.selectEntity);
   const setEntities = useEditorStore((s) => s.setEntities);
   const engineStatus = useEditorStore((s) => s.engineStatus);
+  const executeCommand = useEditorStore((s) => s.executeCommand);
 
   function handleAdd() {
     if (engineStatus !== 'running') return;
     const count = entities.length;
-    spawnCube(
+    const cmd = new SpawnCubeCommand(
       `Cube ${count + 1}`,
-      (Math.random() - 0.5) * 4,
-      (Math.random() - 0.5) * 4,
-      (Math.random() - 0.5) * 4,
-      Math.random(), Math.random(), Math.random(),
+      [(Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4],
+      [Math.random(), Math.random(), Math.random()],
     );
-    setEntities(getSceneObjects());
+    executeCommand(cmd, () => syncScene(setEntities));
+    syncScene(setEntities);
   }
 
   function handleDelete(id: number) {
-    despawn(id);
-    setEntities(getSceneObjects());
+    const entity = entities.find((e) => e.id === id);
+    if (!entity) return;
+    const cmd = new DespawnCommand(entity);
+    executeCommand(cmd, () => syncScene(setEntities));
+    syncScene(setEntities);
     if (selectedId === id) selectEntity(null);
   }
 

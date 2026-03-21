@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useEditorStore } from '../store/editor';
-import { setTransform, setMaterial, getSceneObjects } from '../bridge/EngineAPI';
+import { SetTransformCommand, SetMaterialCommand, syncScene } from '../commands';
 import type { SceneObjectInfo } from '../bridge/EngineAPI';
 
 const PANEL: React.CSSProperties = {
@@ -47,16 +47,8 @@ function NumberInput({
       value={local}
       step={step}
       onChange={(e) => setLocal(e.target.value)}
-      onBlur={() => {
-        const n = parseFloat(local);
-        if (!isNaN(n)) onChange(n);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          const n = parseFloat(local);
-          if (!isNaN(n)) onChange(n);
-        }
-      }}
+      onBlur={() => { const n = parseFloat(local); if (!isNaN(n)) onChange(n); }}
+      onKeyDown={(e) => { if (e.key === 'Enter') { const n = parseFloat(local); if (!isNaN(n)) onChange(n); } }}
       style={{
         width: '100%', background: '#1a1a28', border: '1px solid #2a2a3a',
         color: '#c0c0d0', borderRadius: 3, padding: '2px 4px', fontSize: 11,
@@ -76,7 +68,9 @@ function Vec3Row({ label, values, onChange }: {
       <span style={{ width: 60, fontSize: 11, color: '#606070', flexShrink: 0 }}>{label}</span>
       {(['x', 'y', 'z'] as const).map((axis, i) => (
         <div key={axis} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 2 }}>
-          <span style={{ fontSize: 10, color: axis === 'x' ? '#f87171' : axis === 'y' ? '#4ade80' : '#60a5fa', width: 8, flexShrink: 0 }}>{axis.toUpperCase()}</span>
+          <span style={{ fontSize: 10, color: axis === 'x' ? '#f87171' : axis === 'y' ? '#4ade80' : '#60a5fa', width: 8, flexShrink: 0 }}>
+            {axis.toUpperCase()}
+          </span>
           <NumberInput
             value={values[i]}
             onChange={(v) => {
@@ -95,34 +89,39 @@ export function Inspector() {
   const entities = useEditorStore((s) => s.entities);
   const selectedId = useEditorStore((s) => s.selectedId);
   const setEntities = useEditorStore((s) => s.setEntities);
+  const executeCommand = useEditorStore((s) => s.executeCommand);
 
   const entity = entities.find((e) => e.id === selectedId) ?? null;
 
-  function refresh() {
-    setEntities(getSceneObjects());
+  function applyTransform(partial: Partial<Pick<SceneObjectInfo, 'position' | 'rotation' | 'scale'>>) {
+    if (!entity) return;
+    const before = { position: entity.position, rotation: entity.rotation, scale: entity.scale };
+    const after = {
+      position: partial.position ?? entity.position,
+      rotation: partial.rotation ?? entity.rotation,
+      scale: partial.scale ?? entity.scale,
+    };
+    const cmd = new SetTransformCommand(entity.id, before, after);
+    executeCommand(cmd, () => syncScene(setEntities));
+    syncScene(setEntities);
   }
 
-  function updateTransform(partial: Partial<Pick<SceneObjectInfo, 'position' | 'rotation' | 'scale'>>) {
+  function applyMaterial(partial: Partial<Pick<SceneObjectInfo, 'albedo' | 'metallic' | 'roughness'>>) {
     if (!entity) return;
-    const pos = partial.position ?? entity.position;
-    const rot = partial.rotation ?? entity.rotation;
-    const scl = partial.scale ?? entity.scale;
-    setTransform(entity.id, pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3], scl[0], scl[1], scl[2]);
-    refresh();
-  }
-
-  function updateMaterial(partial: Partial<Pick<SceneObjectInfo, 'albedo' | 'metallic' | 'roughness'>>) {
-    if (!entity) return;
-    const albedo = partial.albedo ?? entity.albedo;
-    const metallic = partial.metallic ?? entity.metallic;
-    const roughness = partial.roughness ?? entity.roughness;
-    setMaterial(entity.id, albedo[0], albedo[1], albedo[2], metallic, roughness);
-    refresh();
+    const before = { albedo: entity.albedo, metallic: entity.metallic, roughness: entity.roughness };
+    const after = {
+      albedo: partial.albedo ?? entity.albedo,
+      metallic: partial.metallic ?? entity.metallic,
+      roughness: partial.roughness ?? entity.roughness,
+    };
+    const cmd = new SetMaterialCommand(entity.id, before, after);
+    executeCommand(cmd, () => syncScene(setEntities));
+    syncScene(setEntities);
   }
 
   if (!entity) {
     return (
-      <div style={{ ...PANEL }}>
+      <div style={PANEL}>
         <div style={HEADER}>INSPECTOR</div>
         <div style={{ padding: 16, fontSize: 11, color: '#404050', textAlign: 'center' }}>
           Select an entity to inspect.
@@ -136,37 +135,39 @@ export function Inspector() {
       <div style={HEADER}>INSPECTOR — {entity.name}</div>
       <div style={{ flex: 1, overflowY: 'auto' }}>
         <div style={SECTION_LABEL}>TRANSFORM</div>
-        <Vec3Row label="Position" values={entity.position} onChange={(v) => updateTransform({ position: v })} />
-        <Vec3Row label="Scale" values={entity.scale} onChange={(v) => updateTransform({ scale: v })} />
+        <Vec3Row label="Position" values={entity.position} onChange={(v) => applyTransform({ position: v })} />
+        <Vec3Row label="Scale" values={entity.scale} onChange={(v) => applyTransform({ scale: v })} />
 
         <div style={SECTION_LABEL}>MATERIAL</div>
-        <Vec3Row label="Albedo" values={entity.albedo} onChange={(v) => updateMaterial({ albedo: v })} />
+        <Vec3Row label="Albedo" values={entity.albedo} onChange={(v) => applyMaterial({ albedo: v })} />
         <div style={{ display: 'flex', alignItems: 'center', padding: '3px 10px', gap: 4 }}>
           <span style={{ width: 60, fontSize: 11, color: '#606070', flexShrink: 0 }}>Metallic</span>
           <div style={{ flex: 1 }}>
-            <NumberInput value={entity.metallic} step={0.05} onChange={(v) => updateMaterial({ metallic: Math.max(0, Math.min(1, v)) })} />
+            <NumberInput value={entity.metallic} step={0.05}
+              onChange={(v) => applyMaterial({ metallic: Math.max(0, Math.min(1, v)) })} />
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', padding: '3px 10px', gap: 4 }}>
           <span style={{ width: 60, fontSize: 11, color: '#606070', flexShrink: 0 }}>Roughness</span>
           <div style={{ flex: 1 }}>
-            <NumberInput value={entity.roughness} step={0.05} onChange={(v) => updateMaterial({ roughness: Math.max(0, Math.min(1, v)) })} />
+            <NumberInput value={entity.roughness} step={0.05}
+              onChange={(v) => applyMaterial({ roughness: Math.max(0, Math.min(1, v)) })} />
           </div>
         </div>
 
         {/* Clickable color picker swatch (like Unity) */}
         <div style={{ padding: '6px 10px' }}>
           <label style={{ display: 'block', cursor: 'pointer', position: 'relative' }} title="Click to open color picker">
-            <div style={{
-              height: 22,
-              borderRadius: 4,
-              background: `rgb(${Math.round(entity.albedo[0] * 255)}, ${Math.round(entity.albedo[1] * 255)}, ${Math.round(entity.albedo[2] * 255)})`,
-              border: '2px solid #3a3a5a',
-              boxShadow: '0 0 0 1px #1a1a2a',
-              transition: 'border-color 0.15s',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.borderColor = '#6060cc')}
-            onMouseLeave={e => (e.currentTarget.style.borderColor = '#3a3a5a')}
+            <div
+              style={{
+                height: 22, borderRadius: 4,
+                background: `rgb(${Math.round(entity.albedo[0] * 255)}, ${Math.round(entity.albedo[1] * 255)}, ${Math.round(entity.albedo[2] * 255)})`,
+                border: '2px solid #3a3a5a',
+                boxShadow: '0 0 0 1px #1a1a2a',
+                transition: 'border-color 0.15s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.borderColor = '#6060cc')}
+              onMouseLeave={e => (e.currentTarget.style.borderColor = '#3a3a5a')}
             />
             <input
               type="color"
@@ -176,7 +177,7 @@ export function Inspector() {
                 const r = parseInt(hex.slice(1, 3), 16) / 255;
                 const g = parseInt(hex.slice(3, 5), 16) / 255;
                 const b = parseInt(hex.slice(5, 7), 16) / 255;
-                updateMaterial({ albedo: [r, g, b] });
+                applyMaterial({ albedo: [r, g, b] });
               }}
               style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }}
             />
