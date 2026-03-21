@@ -210,24 +210,50 @@ export function MenuBar({ menus, statusLabel, statusColor }: Props) {
         />
       ))}
 
-      {/* Right-side status (macOS menu-bar-extra style) */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 5,
-          padding: '1px 8px',
-          borderRadius: 5,
-          color: statusColor,
-          fontSize: 12,
-          fontWeight: 500,
-        }}>
+      {/* Right-side status — icon only, dropdown on click (macOS menu-bar-extra style) */}
+      <div style={{ marginLeft: 'auto', position: 'relative' }}>
+        <div
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 28, height: 26,
+            borderRadius: 5,
+            cursor: 'default',
+            background: openMenu === -1 ? 'rgba(255,255,255,0.12)' : 'transparent',
+          }}
+          onClick={() => setOpenMenu(openMenu === -1 ? null : -1)}
+        >
           <div style={{
-            width: 6, height: 6, borderRadius: '50%',
+            width: 8, height: 8, borderRadius: '50%',
             background: statusColor,
-            boxShadow: `0 0 5px ${statusColor}`,
-            flexShrink: 0,
+            boxShadow: `0 0 6px ${statusColor}`,
           }} />
-          {statusLabel}
         </div>
+        {openMenu === -1 && (
+          <div style={{ ...DROPDOWN, right: 0, left: 'auto', minWidth: 180 }}>
+            <div style={{
+              ...DROP_ITEM_BASE,
+              margin: '0 4px',
+              color: '#a0a0b0',
+              fontSize: 11,
+              height: 'auto',
+              padding: '6px 14px 4px',
+              display: 'block',
+              cursor: 'default',
+            }}>
+              RENDERER STATUS
+            </div>
+            <div style={{ height: 1, background: 'rgba(255,255,255,0.08)', margin: '3px 0' }} />
+            <div style={{ ...DROP_ITEM_BASE, margin: '0 4px', color: statusColor, cursor: 'default' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: statusColor, boxShadow: `0 0 5px ${statusColor}`, flexShrink: 0 }} />
+                {statusLabel}
+              </span>
+            </div>
+            <div style={{ ...DROP_ITEM_BASE, margin: '0 4px', color: 'rgba(255,255,255,0.3)', fontSize: 11, cursor: 'default' }}>
+              Backend: WebGPU
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
