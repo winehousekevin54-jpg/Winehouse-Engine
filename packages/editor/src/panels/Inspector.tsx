@@ -154,14 +154,33 @@ export function Inspector() {
           </div>
         </div>
 
-        {/* Color preview swatch */}
-        <div style={{ padding: '8px 10px' }}>
-          <div style={{
-            height: 20,
-            borderRadius: 4,
-            background: `rgb(${Math.round(entity.albedo[0] * 255)}, ${Math.round(entity.albedo[1] * 255)}, ${Math.round(entity.albedo[2] * 255)})`,
-            border: '1px solid #2a2a3a',
-          }} />
+        {/* Clickable color picker swatch (like Unity) */}
+        <div style={{ padding: '6px 10px' }}>
+          <label style={{ display: 'block', cursor: 'pointer', position: 'relative' }} title="Click to open color picker">
+            <div style={{
+              height: 22,
+              borderRadius: 4,
+              background: `rgb(${Math.round(entity.albedo[0] * 255)}, ${Math.round(entity.albedo[1] * 255)}, ${Math.round(entity.albedo[2] * 255)})`,
+              border: '2px solid #3a3a5a',
+              boxShadow: '0 0 0 1px #1a1a2a',
+              transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.borderColor = '#6060cc')}
+            onMouseLeave={e => (e.currentTarget.style.borderColor = '#3a3a5a')}
+            />
+            <input
+              type="color"
+              value={`#${Math.round(entity.albedo[0] * 255).toString(16).padStart(2, '0')}${Math.round(entity.albedo[1] * 255).toString(16).padStart(2, '0')}${Math.round(entity.albedo[2] * 255).toString(16).padStart(2, '0')}`}
+              onChange={(e) => {
+                const hex = e.target.value;
+                const r = parseInt(hex.slice(1, 3), 16) / 255;
+                const g = parseInt(hex.slice(3, 5), 16) / 255;
+                const b = parseInt(hex.slice(5, 7), 16) / 255;
+                updateMaterial({ albedo: [r, g, b] });
+              }}
+              style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }}
+            />
+          </label>
         </div>
       </div>
     </div>
