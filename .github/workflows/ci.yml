@@ -26,11 +26,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+      - name: Clippy (native crates only)
+        run: cargo clippy --workspace --exclude winehouse-wasm-bridge -- -D warnings
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Test (native crates only)
+        run: cargo test --workspace --exclude winehouse-wasm-bridge
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
@@ -70,7 +70,7 @@ jobs:
         run: pnpm install
 
       - name: TypeScript check
-        run: pnpm --filter @winehouse/editor tsc --noEmit
+        run: pnpm --filter @winehouse/editor exec tsc --noEmit
 
       - name: Build editor
         run: pnpm --filter @winehouse/editor build

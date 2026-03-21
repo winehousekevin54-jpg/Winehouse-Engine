@@ -61,7 +61,9 @@ impl World {
             .components
             .entry(TypeId::of::<T>())
             .or_insert_with(|| Box::new(HashMap::<u32, Box<dyn Any>>::new()));
-        let map = storage.downcast_mut::<HashMap<u32, Box<dyn Any>>>().unwrap();
+        let map = storage
+            .downcast_mut::<HashMap<u32, Box<dyn Any>>>()
+            .unwrap();
         map.insert(entity.index(), Box::new(component));
     }
 

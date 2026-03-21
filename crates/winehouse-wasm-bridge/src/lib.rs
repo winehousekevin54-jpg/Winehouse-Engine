@@ -44,10 +44,13 @@ pub async fn start_renderer(canvas_id: &str) -> Result<(), JsValue> {
     log::info!("GPU Adapter: {:?}", adapter.get_info());
 
     let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor {
-            label: Some("Winehouse Device"),
-            ..Default::default()
-        }, None)
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("Winehouse Device"),
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .map_err(|e| JsValue::from_str(&format!("Failed to create device: {e}")))?;
 
@@ -80,9 +83,18 @@ pub async fn start_renderer(canvas_id: &str) -> Result<(), JsValue> {
     }
 
     let vertices = [
-        Vertex { position: [0.0, 0.5], color: [1.0, 0.0, 0.0] },     // top - red
-        Vertex { position: [-0.5, -0.5], color: [0.0, 1.0, 0.0] },   // bottom left - green
-        Vertex { position: [0.5, -0.5], color: [0.0, 0.0, 1.0] },    // bottom right - blue
+        Vertex {
+            position: [0.0, 0.5],
+            color: [1.0, 0.0, 0.0],
+        }, // top - red
+        Vertex {
+            position: [-0.5, -0.5],
+            color: [0.0, 1.0, 0.0],
+        }, // bottom left - green
+        Vertex {
+            position: [0.5, -0.5],
+            color: [0.0, 0.0, 1.0],
+        }, // bottom right - blue
     ];
 
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -215,7 +227,9 @@ pub async fn start_renderer(canvas_id: &str) -> Result<(), JsValue> {
             let window = web_sys::window().unwrap();
             let r = render.borrow();
             let cb = r.as_ref().unwrap();
-            window.request_animation_frame(cb.as_ref().unchecked_ref()).ok();
+            window
+                .request_animation_frame(cb.as_ref().unchecked_ref())
+                .ok();
         }
     }));
 
@@ -223,7 +237,8 @@ pub async fn start_renderer(canvas_id: &str) -> Result<(), JsValue> {
     let window = web_sys::window().unwrap();
     let r = render_clone.borrow();
     let cb = r.as_ref().unwrap();
-    window.request_animation_frame(cb.as_ref().unchecked_ref())
+    window
+        .request_animation_frame(cb.as_ref().unchecked_ref())
         .map_err(|e| JsValue::from_str(&format!("Failed to start render loop: {e:?}")))?;
 
     log::info!("Render loop started");
