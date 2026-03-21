@@ -1,0 +1,15 @@
+{
+  "name": "winehouse-engine",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Modern AAA web game engine with CGI AI Agent",
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "scripts": {
+    "dev": "pnpm --filter @winehouse/editor dev",
+    "build": "pnpm --filter @winehouse/editor build",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test"
+  }
+}

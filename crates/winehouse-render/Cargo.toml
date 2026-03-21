@@ -1,0 +1,12 @@
+[package]
+name = "winehouse-render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+winehouse-ecs = { path = "../winehouse-ecs" }
+wgpu = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+bytemuck = { workspace = true }
+serde = { workspace = true }

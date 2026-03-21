@@ -1,0 +1,10 @@
+[package]
+name = "winehouse-animation"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+winehouse-ecs = { path = "../winehouse-ecs" }
+glam = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }

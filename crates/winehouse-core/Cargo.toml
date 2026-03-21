@@ -1,0 +1,16 @@
+[package]
+name = "winehouse-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+winehouse-ecs = { path = "../winehouse-ecs" }
+winehouse-render = { path = "../winehouse-render" }
+winehouse-asset = { path = "../winehouse-asset" }
+winehouse-physics = { path = "../winehouse-physics" }
+winehouse-audio = { path = "../winehouse-audio" }
+winehouse-animation = { path = "../winehouse-animation" }
+winehouse-scene = { path = "../winehouse-scene" }
+winehouse-input = { path = "../winehouse-input" }
+winehouse-scripting = { path = "../winehouse-scripting" }
+log = { workspace = true }

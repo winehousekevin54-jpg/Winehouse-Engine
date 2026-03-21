@@ -1,0 +1,26 @@
+[package]
+name = "winehouse-wasm-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+winehouse-core = { path = "../winehouse-core" }
+winehouse-ecs = { path = "../winehouse-ecs" }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+js-sys = { workspace = true }
+wgpu = { workspace = true }
+log = { workspace = true }
+web-sys = { workspace = true, features = [
+    "Document",
+    "Window",
+    "Element",
+    "HtmlCanvasElement",
+    "console",
+] }
+bytemuck = { workspace = true }
+console_log = "1"
+console_error_panic_hook = "0.1"
