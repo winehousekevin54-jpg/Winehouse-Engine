@@ -77,6 +77,8 @@ pub struct Renderer {
     render_pipeline: wgpu::RenderPipeline,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    msaa_texture: wgpu::Texture,
+    msaa_view: wgpu::TextureView,
 
     // Static geometry (cube shared for all objects for now)
     cube_vertex_buffer: wgpu::Buffer,
@@ -132,9 +134,11 @@ impl Renderer {
         };
         surface.configure(&device, &surface_config);
 
-        // Depth texture
+        // Depth texture + MSAA texture
         let (depth_texture, depth_view) =
             create_depth_texture(&device, surface_config.width, surface_config.height);
+        let (msaa_texture, msaa_view) =
+            create_msaa_texture(&device, format, surface_config.width, surface_config.height);
 
         // Shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -228,7 +232,7 @@ impl Renderer {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState { count: 4, mask: !0, alpha_to_coverage_enabled: false },
             multiview: None,
             cache: None,
         });
@@ -262,6 +266,8 @@ impl Renderer {
             render_pipeline,
             depth_texture,
             depth_view,
+            msaa_texture,
+            msaa_view,
             cube_vertex_buffer,
             cube_index_buffer,
             cube_index_count: idxs.len() as u32,
@@ -281,6 +287,9 @@ impl Renderer {
         let (dt, dv) = create_depth_texture(&self.device, width, height);
         self.depth_texture = dt;
         self.depth_view = dv;
+        let (mt, mv) = create_msaa_texture(&self.device, self.surface_config.format, width, height);
+        self.msaa_texture = mt;
+        self.msaa_view = mv;
     }
 
     pub fn spawn_cube(&mut self, name: &str, position: [f32; 3], albedo: [f32; 3]) -> u64 {
@@ -376,11 +385,11 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("PBR Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: &self.msaa_view,
+                    resolve_target: Some(&view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.07, g: 0.07, b: 0.10, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Discard,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -420,9 +429,26 @@ fn create_depth_texture(
         label: Some("Depth"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: 4, // must match MSAA pipeline count
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    (tex, view)
+}
+
+fn create_msaa_texture(
+    device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("MSAA"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 4,
+        dimension: wgpu::TextureDimension::D2,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
