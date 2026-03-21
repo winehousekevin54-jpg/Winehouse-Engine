@@ -210,23 +210,38 @@ export function MenuBar({ menus, statusLabel, statusColor }: Props) {
         />
       ))}
 
-      {/* Right-side status — icon only, dropdown on click (macOS menu-bar-extra style) */}
+      {/* Right-side status — GPU icon, dropdown on click (macOS menu-bar-extra style) */}
       <div style={{ marginLeft: 'auto', position: 'relative' }}>
         <div
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            width: 28, height: 26,
+            width: 30, height: 26,
             borderRadius: 5,
             cursor: 'default',
             background: openMenu === -1 ? 'rgba(255,255,255,0.12)' : 'transparent',
           }}
           onClick={() => setOpenMenu(openMenu === -1 ? null : -1)}
         >
-          <div style={{
-            width: 8, height: 8, borderRadius: '50%',
-            background: statusColor,
-            boxShadow: `0 0 6px ${statusColor}`,
-          }} />
+          {/* GPU chip icon */}
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+            style={{ color: statusColor, filter: `drop-shadow(0 0 3px ${statusColor})` }}>
+            {/* Chip body */}
+            <rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
+            {/* Pins — left */}
+            <line x1="1.5" y1="6.2" x2="4" y2="6.2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+            <line x1="1.5" y1="9.8" x2="4" y2="9.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+            {/* Pins — right */}
+            <line x1="12" y1="6.2" x2="14.5" y2="6.2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+            <line x1="12" y1="9.8" x2="14.5" y2="9.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+            {/* Pins — top */}
+            <line x1="6.2" y1="1.5" x2="6.2" y2="4" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+            <line x1="9.8" y1="1.5" x2="9.8" y2="4" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+            {/* Pins — bottom */}
+            <line x1="6.2" y1="12" x2="6.2" y2="14.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+            <line x1="9.8" y1="12" x2="9.8" y2="14.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+            {/* Center core */}
+            <rect x="6.2" y="6.2" width="3.6" height="3.6" rx="0.8" fill="currentColor" opacity="0.9"/>
+          </svg>
         </div>
         {openMenu === -1 && (
           <div style={{ ...DROPDOWN, right: 0, left: 'auto', minWidth: 180 }}>
