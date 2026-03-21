@@ -25,6 +25,7 @@ interface EditorState {
   addLog: (message: string) => void;
 
   executeCommand: (cmd: Command, setEntities: (e: SceneObjectInfo[]) => void) => void;
+  pushCommand: (cmd: Command) => void;
   undo: (setEntities: (e: SceneObjectInfo[]) => void) => void;
   redo: (setEntities: (e: SceneObjectInfo[]) => void) => void;
 }
@@ -50,6 +51,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   executeCommand: (cmd, setEntities) => {
     cmd.execute();
     setEntities(get().entities); // will be overridden by caller
+    set((state) => ({
+      undoStack: [...state.undoStack, cmd],
+      redoStack: [],
+    }));
+  },
+
+  // Add to history without executing (use when action already applied live)
+  pushCommand: (cmd) => {
     set((state) => ({
       undoStack: [...state.undoStack, cmd],
       redoStack: [],

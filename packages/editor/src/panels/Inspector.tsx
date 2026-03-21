@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useEditorStore } from '../store/editor';
 import { SetTransformCommand, SetMaterialCommand, syncScene } from '../commands';
+import { setMaterial } from '../bridge/EngineAPI';
 import type { SceneObjectInfo } from '../bridge/EngineAPI';
 
 const PANEL: React.CSSProperties = {
@@ -90,6 +91,10 @@ export function Inspector() {
   const selectedId = useEditorStore((s) => s.selectedId);
   const setEntities = useEditorStore((s) => s.setEntities);
   const executeCommand = useEditorStore((s) => s.executeCommand);
+  const pushCommand = useEditorStore((s) => s.pushCommand);
+
+  // Track albedo at the moment the color picker opens, for single-commit undo
+  const colorPickerStart = useRef<[number, number, number] | null>(null);
 
   const entity = entities.find((e) => e.id === selectedId) ?? null;
 
@@ -155,7 +160,7 @@ export function Inspector() {
           </div>
         </div>
 
-        {/* Clickable color picker swatch (like Unity) */}
+        {/* Clickable color picker swatch — live preview, single undo entry */}
         <div style={{ padding: '6px 10px' }}>
           <label style={{ display: 'block', cursor: 'pointer', position: 'relative' }} title="Click to open color picker">
             <div
@@ -172,12 +177,35 @@ export function Inspector() {
             <input
               type="color"
               value={`#${Math.round(entity.albedo[0] * 255).toString(16).padStart(2, '0')}${Math.round(entity.albedo[1] * 255).toString(16).padStart(2, '0')}${Math.round(entity.albedo[2] * 255).toString(16).padStart(2, '0')}`}
+              onFocus={() => {
+                // Snapshot the color at the moment the picker opens
+                colorPickerStart.current = entity.albedo;
+              }}
               onChange={(e) => {
+                // Live preview: apply directly to WASM, no command yet
                 const hex = e.target.value;
                 const r = parseInt(hex.slice(1, 3), 16) / 255;
                 const g = parseInt(hex.slice(3, 5), 16) / 255;
                 const b = parseInt(hex.slice(5, 7), 16) / 255;
-                applyMaterial({ albedo: [r, g, b] });
+                setMaterial(entity.id, r, g, b, entity.metallic, entity.roughness);
+                syncScene(setEntities);
+              }}
+              onBlur={(e) => {
+                // Picker closed: commit ONE command covering the full change
+                if (!colorPickerStart.current) return;
+                const hex = e.target.value;
+                const r = parseInt(hex.slice(1, 3), 16) / 255;
+                const g = parseInt(hex.slice(3, 5), 16) / 255;
+                const b = parseInt(hex.slice(5, 7), 16) / 255;
+                const finalAlbedo: [number, number, number] = [r, g, b];
+                const before = colorPickerStart.current;
+                colorPickerStart.current = null;
+                if (before.join() === finalAlbedo.join()) return; // no change
+                pushCommand(new SetMaterialCommand(
+                  entity.id,
+                  { albedo: before,       metallic: entity.metallic, roughness: entity.roughness },
+                  { albedo: finalAlbedo,  metallic: entity.metallic, roughness: entity.roughness },
+                ));
               }}
               style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }}
             />
