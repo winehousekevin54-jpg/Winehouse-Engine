@@ -7,12 +7,10 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-winehouse-core = { path = "../winehouse-core" }
-winehouse-ecs = { path = "../winehouse-ecs" }
+winehouse-render = { path = "../winehouse-render" }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = "0.4"
 js-sys = { workspace = true }
-wgpu = { workspace = true }
 log = { workspace = true }
 web-sys = { workspace = true, features = [
     "Document",
@@ -21,6 +19,5 @@ web-sys = { workspace = true, features = [
     "HtmlCanvasElement",
     "console",
 ] }
-bytemuck = { workspace = true }
 console_log = "1"
 console_error_panic_hook = "0.1"
