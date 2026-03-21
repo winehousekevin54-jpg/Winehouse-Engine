@@ -28,13 +28,14 @@ export function SceneView() {
     return () => cancelAnimationFrame(rafRef.current);
   }, [engineStatus, setEntities]);
 
-  // Resize observer
+  // Resize observer — account for device pixel ratio (Retina / HiDPI)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const obs = new ResizeObserver(() => {
-      const w = canvas.clientWidth;
-      const h = canvas.clientHeight;
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.round(canvas.clientWidth * dpr);
+      const h = Math.round(canvas.clientHeight * dpr);
       canvas.width = w;
       canvas.height = h;
       resizeViewport(w, h);

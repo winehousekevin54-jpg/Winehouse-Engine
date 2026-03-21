@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { initEngine } from './bridge/EngineAPI';
+import { initEngine, getSceneObjects } from './bridge/EngineAPI';
 import { useEditorStore } from './store/editor';
 import { SceneView } from './panels/SceneView';
 import { Hierarchy } from './panels/Hierarchy';
@@ -10,6 +10,7 @@ export function App() {
   const engineStatus = useEditorStore((s) => s.engineStatus);
   const engineError = useEditorStore((s) => s.engineError);
   const setEngineStatus = useEditorStore((s) => s.setEngineStatus);
+  const setEntities = useEditorStore((s) => s.setEntities);
   const addLog = useEditorStore((s) => s.addLog);
 
   useEffect(() => {
@@ -21,6 +22,7 @@ export function App() {
         await initEngine('viewport');
         if (cancelled) return;
         addLog('Engine initialized — WebGPU ready.');
+        setEntities(getSceneObjects());
         setEngineStatus('running');
       } catch (e) {
         if (cancelled) return;
