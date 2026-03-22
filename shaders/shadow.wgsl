@@ -23,6 +23,8 @@ struct ObjectUniforms {
 fn vs_main(
     @location(0) position: vec3<f32>,
     @location(1) _normal:  vec3<f32>,
+    @location(2) _uv:      vec2<f32>,
+    @location(3) _tangent: vec4<f32>,
 ) -> @builtin(position) vec4<f32> {
     return shadow_uni.light_view_proj * object.model * vec4<f32>(position, 1.0);
 }

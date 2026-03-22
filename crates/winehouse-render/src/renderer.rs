@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
-use crate::mesh::{vertex_buffer_layout, GpuMesh, Vertex};
+use crate::mesh::{vertex_buffer_layout, ExtractedTexture, GpuMesh, Vertex};
 
 // ── GPU uniform structs ───────────────────────────────────────────────────────
 
@@ -76,6 +76,30 @@ struct CasUniforms {
     _pad:      [f32; 3],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsrUniforms {
+    view_proj:     [[f32; 4]; 4],
+    inv_view_proj: [[f32; 4]; 4],
+    viewport:      [f32; 2],
+    near:          f32,
+    far:           f32,
+    camera_pos:    [f32; 3],
+    max_distance:  f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct VolumetricUniforms {
+    scattering:   [f32; 3],
+    density:      f32,
+    absorption:   [f32; 3],
+    g_factor:     f32,
+    max_distance: f32,
+    steps:        f32,
+    _pad:         [f32; 2],
+}
+
 // ── Scene object ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -141,6 +165,12 @@ pub struct Renderer {
     // CAS uniform buffer
     cas_buffer:      wgpu::Buffer,
 
+    // SSR uniform buffer
+    ssr_buffer:      wgpu::Buffer,
+
+    // Volumetric uniform buffer
+    vol_buffer:      wgpu::Buffer,
+
     // Bind group layouts
     object_bgl:           wgpu::BindGroupLayout,
     lighting_uniforms_bgl: wgpu::BindGroupLayout,
@@ -152,6 +182,10 @@ pub struct Renderer {
     tonemap_bgl:          wgpu::BindGroupLayout,
     cas_bgl:              wgpu::BindGroupLayout,
     taa_bgl:              wgpu::BindGroupLayout,
+    ssr_bgl:              wgpu::BindGroupLayout,
+    ssr_composite_bgl:    wgpu::BindGroupLayout,
+    vol_bgl:              wgpu::BindGroupLayout,
+    vol_composite_bgl:    wgpu::BindGroupLayout,
 
     // Scene uniform bind group (shared across G-Buffer + shadow)
     scene_bg:          wgpu::BindGroup,
@@ -168,6 +202,10 @@ pub struct Renderer {
     tonemap_bg:           wgpu::BindGroup,
     cas_bg:               wgpu::BindGroup,
     taa_bg:               wgpu::BindGroup,
+    ssr_bg:               wgpu::BindGroup,
+    ssr_composite_bg:     wgpu::BindGroup,
+    vol_bg:               wgpu::BindGroup,
+    vol_composite_bg:     wgpu::BindGroup,
 
     // Size-dependent textures
     gbuffer_albedo_view:    wgpu::TextureView,
@@ -184,17 +222,26 @@ pub struct Renderer {
     taa_output_view:        wgpu::TextureView,
     taa_history_tex:        wgpu::Texture,
     taa_output_tex:         wgpu::Texture,
+    ssr_view:               wgpu::TextureView,
+    ssr_hdr_view:           wgpu::TextureView,
+    vol_view:               wgpu::TextureView,
 
     // Fixed textures
     shadow_array_view:     wgpu::TextureView,
     shadow_cascade_views:  [wgpu::TextureView; 4],
     noise_view:            wgpu::TextureView,
 
+    // Default PBR textures (1×1 fallbacks)
+    default_albedo_view:   wgpu::TextureView,
+    default_normal_view:   wgpu::TextureView,
+    default_mr_view:       wgpu::TextureView,
+
     // Samplers
     linear_sampler:   wgpu::Sampler,
     repeat_sampler:   wgpu::Sampler,
     shadow_sampler:   wgpu::Sampler,
     point_sampler:    wgpu::Sampler,
+    material_sampler: wgpu::Sampler,
 
     // Pipelines
     gbuffer_pipeline:          wgpu::RenderPipeline,
@@ -207,6 +254,10 @@ pub struct Renderer {
     tonemap_pipeline:          wgpu::RenderPipeline,
     cas_pipeline:              wgpu::RenderPipeline,
     taa_pipeline:              wgpu::RenderPipeline,
+    ssr_pipeline:              wgpu::RenderPipeline,
+    ssr_composite_pipeline:    wgpu::RenderPipeline,
+    vol_pipeline:              wgpu::RenderPipeline,
+    vol_composite_pipeline:    wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -270,6 +321,10 @@ impl Renderer {
         let sh_tonemap  = shader(&device, include_str!("../../../shaders/tonemap.wgsl"),  "Tonemap");
         let sh_cas      = shader(&device, include_str!("../../../shaders/cas.wgsl"),      "CAS");
         let sh_taa      = shader(&device, include_str!("../../../shaders/taa.wgsl"),      "TAA");
+        let sh_ssr      = shader(&device, include_str!("../../../shaders/ssr.wgsl"),      "SSR");
+        let sh_ssr_comp = shader(&device, include_str!("../../../shaders/ssr_composite.wgsl"), "SSR Composite");
+        let sh_vol      = shader(&device, include_str!("../../../shaders/volumetric.wgsl"), "Volumetric");
+        let sh_vol_comp = shader(&device, include_str!("../../../shaders/volumetric_composite.wgsl"), "Volumetric Composite");
 
         // ── Samplers ───────────────────────────────────────────────────────────
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -308,6 +363,8 @@ impl Renderer {
         let lighting_buffer = uniform_buf(&device, std::mem::size_of::<LightingUniforms>(), "Lighting");
         let taa_buffer      = uniform_buf(&device, std::mem::size_of::<TaaUniforms>(),      "TAA");
         let cas_buffer      = uniform_buf(&device, std::mem::size_of::<CasUniforms>(),      "CAS");
+        let ssr_buffer      = uniform_buf(&device, std::mem::size_of::<SsrUniforms>(),      "SSR");
+        let vol_buffer      = uniform_buf(&device, std::mem::size_of::<VolumetricUniforms>(), "Volumetric");
 
         let w2 = width.max(2) / 2;
         let h2 = height.max(2) / 2;
@@ -332,6 +389,20 @@ impl Renderer {
         let (_shadow_map_tex, shadow_array_view, shadow_cascade_views) = create_shadow_map(&device);
         let (_noise_tex, noise_view) = create_noise_texture(&device, &queue);
 
+        // ── Default PBR textures (1×1 fallbacks) ──────────────────────────────
+        let default_albedo_view = create_1x1_texture(&device, &queue, &[255, 255, 255, 255], wgpu::TextureFormat::Rgba8UnormSrgb, "Default Albedo");
+        let default_normal_view = create_1x1_texture(&device, &queue, &[128, 128, 255, 255], wgpu::TextureFormat::Rgba8Unorm, "Default Normal");
+        let default_mr_view     = create_1x1_texture(&device, &queue, &[0, 128, 0, 255],     wgpu::TextureFormat::Rgba8Unorm, "Default MR");
+        let material_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label:           Some("Material"),
+            address_mode_u:  wgpu::AddressMode::Repeat,
+            address_mode_v:  wgpu::AddressMode::Repeat,
+            mag_filter:      wgpu::FilterMode::Linear,
+            min_filter:      wgpu::FilterMode::Linear,
+            mipmap_filter:   wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         // ── Bind group layouts ─────────────────────────────────────────────────
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("Scene BGL"),
@@ -339,7 +410,13 @@ impl Renderer {
         });
         let object_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("Object BGL"),
-            entries: &[bgl_uniform(0, wgpu::ShaderStages::VERTEX_FRAGMENT)],
+            entries: &[
+                bgl_uniform(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
+                bgl_texture_2d(1),   // albedo map
+                bgl_texture_2d(2),   // normal map
+                bgl_texture_2d(3),   // metallic-roughness map
+                bgl_sampler(4),      // material sampler
+            ],
         });
         let shadow_pass_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("Shadow Pass BGL"),
@@ -402,6 +479,49 @@ impl Renderer {
                 bgl_texture_2d(3),
                 bgl_depth_texture(4),
                 bgl_sampler(5),
+            ],
+        });
+
+        let ssr_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("SSR BGL"),
+            entries: &[
+                bgl_uniform(0, wgpu::ShaderStages::FRAGMENT),  // SsrUniforms
+                bgl_texture_2d(1),      // HDR (lit scene)
+                bgl_depth_texture(2),   // G-Buffer depth
+                bgl_texture_2d(3),      // G-Buffer normal
+                bgl_texture_2d(4),      // G-Buffer albedo (for roughness/metallic)
+                bgl_sampler(5),         // linear sampler
+                bgl_sampler(6),         // point sampler
+            ],
+        });
+        let ssr_composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("SSR Composite BGL"),
+            entries: &[
+                bgl_texture_2d(0),      // HDR
+                bgl_texture_2d(1),      // SSR result
+                bgl_sampler(2),         // linear sampler
+            ],
+        });
+
+        let vol_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("Volumetric BGL"),
+            entries: &[
+                bgl_uniform(0, wgpu::ShaderStages::VERTEX_FRAGMENT),  // SceneUniforms
+                bgl_uniform(1, wgpu::ShaderStages::FRAGMENT),         // LightingUniforms
+                bgl_depth_texture(2),                                  // G-Buffer depth
+                bgl_depth_texture_array(3),                            // Shadow cascade array
+                bgl_comparison_sampler(4),                             // Shadow sampler
+                bgl_texture_2d(5),                                     // Noise texture
+                bgl_sampler(6),                                        // Repeat sampler
+                bgl_uniform(7, wgpu::ShaderStages::FRAGMENT),         // VolumetricUniforms
+            ],
+        });
+        let vol_composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("Volumetric Composite BGL"),
+            entries: &[
+                bgl_texture_2d(0),   // HDR (ssr_hdr)
+                bgl_texture_2d(1),   // Volumetric result
+                bgl_sampler(2),      // Linear sampler
             ],
         });
 
@@ -544,6 +664,26 @@ impl Renderer {
             &[&taa_bgl],
             &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
+        let ssr_pipeline = fullscreen_pipeline(
+            &device, &sh_ssr, "SSR",
+            &[&ssr_bgl],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        );
+        let ssr_composite_pipeline = fullscreen_pipeline(
+            &device, &sh_ssr_comp, "SSR Composite",
+            &[&ssr_composite_bgl],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        );
+        let vol_pipeline = fullscreen_pipeline(
+            &device, &sh_vol, "Volumetric",
+            &[&vol_bgl],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        );
+        let vol_composite_pipeline = fullscreen_pipeline(
+            &device, &sh_vol_comp, "Volumetric Composite",
+            &[&vol_composite_bgl],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        );
 
         let mut camera = Camera::new();
         camera.set_aspect(surface_config.width, surface_config.height);
@@ -555,11 +695,13 @@ impl Renderer {
             &device, w, h, &linear_sampler, &repeat_sampler,
             &shadow_sampler, &point_sampler,
             &shadow_array_view, &noise_view,
-            &scene_buffer, &lighting_buffer, &taa_buffer, &cas_buffer,
+            &scene_buffer, &lighting_buffer, &taa_buffer, &cas_buffer, &ssr_buffer, &vol_buffer,
             &lighting_uniforms_bgl, &lighting_inputs_bgl,
             &ssao_inputs_bgl, &ssao_blur_bgl,
             &bloom_threshold_bgl, &bloom_blur_bgl,
             &tonemap_bgl, &cas_bgl, &taa_bgl,
+            &ssr_bgl, &ssr_composite_bgl,
+            &vol_bgl, &vol_composite_bgl,
             &bloom_h_buf, &bloom_v_buf,
         );
 
@@ -582,6 +724,8 @@ impl Renderer {
             bloom_v_buffer: bloom_v_buf,
             taa_buffer,
             cas_buffer,
+            ssr_buffer,
+            vol_buffer,
             object_bgl,
             lighting_uniforms_bgl,
             lighting_inputs_bgl,
@@ -592,6 +736,10 @@ impl Renderer {
             tonemap_bgl,
             cas_bgl,
             taa_bgl,
+            ssr_bgl,
+            ssr_composite_bgl,
+            vol_bgl,
+            vol_composite_bgl,
             scene_bg,
             shadow_pass_bgs,
             lighting_uniforms_bg:  size_deps.lighting_uniforms_bg,
@@ -604,6 +752,10 @@ impl Renderer {
             tonemap_bg:            size_deps.tonemap_bg,
             cas_bg:                size_deps.cas_bg,
             taa_bg:                size_deps.taa_bg,
+            ssr_bg:                size_deps.ssr_bg,
+            ssr_composite_bg:      size_deps.ssr_composite_bg,
+            vol_bg:                size_deps.vol_bg,
+            vol_composite_bg:      size_deps.vol_composite_bg,
             gbuffer_albedo_view:   size_deps.gbuffer_albedo_view,
             gbuffer_normal_view:   size_deps.gbuffer_normal_view,
             gbuffer_depth_view:    size_deps.gbuffer_depth_view,
@@ -618,13 +770,20 @@ impl Renderer {
             taa_output_view:       size_deps.taa_output_view,
             taa_history_tex:       size_deps.taa_history_tex,
             taa_output_tex:        size_deps.taa_output_tex,
+            ssr_view:              size_deps.ssr_view,
+            ssr_hdr_view:          size_deps.ssr_hdr_view,
+            vol_view:              size_deps.vol_view,
             shadow_array_view,
             shadow_cascade_views,
             noise_view,
+            default_albedo_view,
+            default_normal_view,
+            default_mr_view,
             linear_sampler,
             repeat_sampler,
             shadow_sampler,
             point_sampler,
+            material_sampler,
             gbuffer_pipeline,
             shadow_pipeline,
             lighting_pipeline,
@@ -635,6 +794,10 @@ impl Renderer {
             tonemap_pipeline,
             cas_pipeline,
             taa_pipeline,
+            ssr_pipeline,
+            ssr_composite_pipeline,
+            vol_pipeline,
+            vol_composite_pipeline,
         })
     }
 
@@ -662,11 +825,13 @@ impl Renderer {
             &self.linear_sampler, &self.repeat_sampler,
             &self.shadow_sampler, &self.point_sampler,
             &self.shadow_array_view, &self.noise_view,
-            &self.scene_buffer, &self.lighting_buffer, &self.taa_buffer, &self.cas_buffer,
+            &self.scene_buffer, &self.lighting_buffer, &self.taa_buffer, &self.cas_buffer, &self.ssr_buffer, &self.vol_buffer,
             &self.lighting_uniforms_bgl, &self.lighting_inputs_bgl,
             &self.ssao_inputs_bgl, &self.ssao_blur_bgl,
             &self.bloom_threshold_bgl, &self.bloom_blur_bgl,
             &self.tonemap_bgl, &self.cas_bgl, &self.taa_bgl,
+            &self.ssr_bgl, &self.ssr_composite_bgl,
+            &self.vol_bgl, &self.vol_composite_bgl,
             &self.bloom_h_buffer, &self.bloom_v_buffer,
         );
         self.lighting_uniforms_bg = sd.lighting_uniforms_bg;
@@ -679,6 +844,10 @@ impl Renderer {
         self.tonemap_bg           = sd.tonemap_bg;
         self.cas_bg               = sd.cas_bg;
         self.taa_bg               = sd.taa_bg;
+        self.ssr_bg               = sd.ssr_bg;
+        self.ssr_composite_bg     = sd.ssr_composite_bg;
+        self.vol_bg               = sd.vol_bg;
+        self.vol_composite_bg     = sd.vol_composite_bg;
         self.gbuffer_albedo_view  = sd.gbuffer_albedo_view;
         self.gbuffer_normal_view  = sd.gbuffer_normal_view;
         self.gbuffer_depth_view   = sd.gbuffer_depth_view;
@@ -693,6 +862,9 @@ impl Renderer {
         self.taa_output_view      = sd.taa_output_view;
         self.taa_history_tex      = sd.taa_history_tex;
         self.taa_output_tex       = sd.taa_output_tex;
+        self.ssr_view             = sd.ssr_view;
+        self.ssr_hdr_view         = sd.ssr_hdr_view;
+        self.vol_view             = sd.vol_view;
         self.taa_valid            = false;
     }
 
@@ -707,27 +879,51 @@ impl Renderer {
             scale: [1.0, 1.0, 1.0],
             albedo, metallic: 0.0, roughness: 0.5,
         };
-        self.push_object(info, GpuMesh::from_cube(&self.device));
+        let albedo_view = self.default_albedo_view.clone();
+        let normal_view = self.default_normal_view.clone();
+        let mr_view     = self.default_mr_view.clone();
+        self.push_object(info, GpuMesh::from_cube(&self.device), &albedo_view, &normal_view, &mr_view);
         id
     }
 
     pub fn load_gltf(&mut self, data: &[u8], name: &str) -> Result<u64, String> {
         let id   = self.next_id;
         self.next_id += 1;
-        let mesh = GpuMesh::from_gltf_bytes(&self.device, data)?;
+        let result = GpuMesh::from_gltf_bytes(&self.device, data)?;
+
+        let albedo_view = match &result.albedo_tex {
+            Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8UnormSrgb, "glTF Albedo"),
+            None => self.default_albedo_view.clone(),
+        };
+        let normal_view = match &result.normal_tex {
+            Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8Unorm, "glTF Normal"),
+            None => self.default_normal_view.clone(),
+        };
+        let mr_view = match &result.metallic_roughness_tex {
+            Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8Unorm, "glTF MR"),
+            None => self.default_mr_view.clone(),
+        };
+
         let info = SceneObjectInfo {
             id, name: name.to_string(),
             position: [0.0, 0.0, 0.0],
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale:    [1.0, 1.0, 1.0],
-            albedo:   [0.8, 0.8, 0.8],
-            metallic: 0.0, roughness: 0.5,
+            albedo:   [1.0, 1.0, 1.0],
+            metallic: 1.0, roughness: 1.0,
         };
-        self.push_object(info, mesh);
+        self.push_object(info, result.mesh, &albedo_view, &normal_view, &mr_view);
         Ok(id)
     }
 
-    fn push_object(&mut self, info: SceneObjectInfo, mesh: GpuMesh) {
+    fn push_object(
+        &mut self,
+        info: SceneObjectInfo,
+        mesh: GpuMesh,
+        albedo_view: &wgpu::TextureView,
+        normal_view: &wgpu::TextureView,
+        mr_view:     &wgpu::TextureView,
+    ) {
         let model = {
             let t = Vec3::from(info.position);
             let r = Quat::from_array(info.rotation);
@@ -742,7 +938,13 @@ impl Renderer {
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:   Some("Object BG"),
             layout:  &self.object_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(albedo_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(normal_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(mr_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.material_sampler) },
+            ],
         });
         self.objects.push(SceneObject {
             info, mesh, object_buffer: buffer, object_bind_group: bind_group,
@@ -859,6 +1061,28 @@ impl Renderer {
         self.queue.write_buffer(&self.cas_buffer, 0, bytemuck::bytes_of(&CasUniforms {
             sharpness: 0.5,
             _pad:      [0.0; 3],
+        }));
+
+        // Update SSR uniforms
+        self.queue.write_buffer(&self.ssr_buffer, 0, bytemuck::bytes_of(&SsrUniforms {
+            view_proj:     unjittered_vp.to_cols_array_2d(),
+            inv_view_proj: inv_vp.to_cols_array_2d(),
+            viewport:      [w, h],
+            near:          self.camera.near,
+            far:           self.camera.far,
+            camera_pos:    cam_pos.to_array(),
+            max_distance:  15.0,
+        }));
+
+        // Update volumetric uniforms
+        self.queue.write_buffer(&self.vol_buffer, 0, bytemuck::bytes_of(&VolumetricUniforms {
+            scattering:   [0.5, 0.5, 0.5],
+            density:      0.02,
+            absorption:   [0.0, 0.0, 0.0],
+            g_factor:     0.76,
+            max_distance: 50.0,
+            steps:        32.0,
+            _pad:         [0.0; 2],
         }));
 
         // Update per-object uniforms with current prev_model, then advance prev_model
@@ -980,7 +1204,67 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 6. TAA resolve (HDR + history → taa_output) ────────────────────────
+        // ── 5b. SSR pass (HDR + G-Buffer → ssr_view) ─────────────────────────
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("SSR Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssr_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.ssr_pipeline);
+            pass.set_bind_group(0, &self.ssr_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ── 5c. SSR Composite (HDR + SSR → ssr_hdr) ──────────────────────────
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("SSR Composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssr_hdr_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.ssr_composite_pipeline);
+            pass.set_bind_group(0, &self.ssr_composite_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ── 5d. Volumetric (ray march → vol_view half-res) ───────────────────
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Volumetric Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.vol_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.vol_pipeline);
+            pass.set_bind_group(0, &self.vol_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ── 5e. Volumetric Composite (ssr_hdr + vol → hdr) ───────────────────
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Volumetric Composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.vol_composite_pipeline);
+            pass.set_bind_group(0, &self.vol_composite_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ── 6. TAA resolve (hdr + history → taa_output) ────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TAA Resolve"),
@@ -1120,6 +1404,9 @@ struct SizeDependentResources {
     taa_output_view:      wgpu::TextureView,
     taa_history_tex:      wgpu::Texture,
     taa_output_tex:       wgpu::Texture,
+    ssr_view:             wgpu::TextureView,
+    ssr_hdr_view:         wgpu::TextureView,
+    vol_view:             wgpu::TextureView,
     lighting_uniforms_bg: wgpu::BindGroup,
     lighting_inputs_bg:   wgpu::BindGroup,
     ssao_bg:              wgpu::BindGroup,
@@ -1130,6 +1417,10 @@ struct SizeDependentResources {
     tonemap_bg:           wgpu::BindGroup,
     cas_bg:               wgpu::BindGroup,
     taa_bg:               wgpu::BindGroup,
+    ssr_bg:               wgpu::BindGroup,
+    ssr_composite_bg:     wgpu::BindGroup,
+    vol_bg:               wgpu::BindGroup,
+    vol_composite_bg:     wgpu::BindGroup,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1148,6 +1439,8 @@ impl SizeDependentResources {
         lighting_buffer:      &wgpu::Buffer,
         taa_buffer:           &wgpu::Buffer,
         cas_buffer:           &wgpu::Buffer,
+        ssr_buffer:           &wgpu::Buffer,
+        vol_buffer:           &wgpu::Buffer,
         lighting_uniforms_bgl:&wgpu::BindGroupLayout,
         lighting_inputs_bgl:  &wgpu::BindGroupLayout,
         ssao_inputs_bgl:      &wgpu::BindGroupLayout,
@@ -1157,6 +1450,10 @@ impl SizeDependentResources {
         tonemap_bgl:          &wgpu::BindGroupLayout,
         cas_bgl:              &wgpu::BindGroupLayout,
         taa_bgl:              &wgpu::BindGroupLayout,
+        ssr_bgl:              &wgpu::BindGroupLayout,
+        ssr_composite_bgl:    &wgpu::BindGroupLayout,
+        vol_bgl:              &wgpu::BindGroupLayout,
+        vol_composite_bgl:    &wgpu::BindGroupLayout,
         bloom_h_buf:          &wgpu::Buffer,
         bloom_v_buf:          &wgpu::Buffer,
     ) -> Self {
@@ -1311,6 +1608,66 @@ impl SizeDependentResources {
             ],
         });
 
+        // SSR textures
+        let ssr_tex  = tex2d(device, w, h, wgpu::TextureFormat::Rgba16Float, "SSR");
+        let ssr_hdr  = tex2d(device, w, h, wgpu::TextureFormat::Rgba16Float, "SSR HDR");
+        let ssr_view     = ssr_tex.create_view(&Default::default());
+        let ssr_hdr_view = ssr_hdr.create_view(&Default::default());
+
+        let ssr_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("SSR BG"),
+            layout:  ssr_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ssr_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&hdr_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&gbuffer_normal_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&gbuffer_albedo_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(point_sampler) },
+            ],
+        });
+
+        let ssr_composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("SSR Composite BG"),
+            layout:  ssr_composite_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hdr_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&ssr_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+            ],
+        });
+
+        // Volumetric textures (half-resolution)
+        let vol_tex  = tex2d(device, w2, h2, wgpu::TextureFormat::Rgba16Float, "Volumetric");
+        let vol_view = vol_tex.create_view(&Default::default());
+
+        let vol_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("Volumetric BG"),
+            layout:  vol_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: scene_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: lighting_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(shadow_array_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(noise_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(repeat_sampler) },
+                wgpu::BindGroupEntry { binding: 7, resource: vol_buffer.as_entire_binding() },
+            ],
+        });
+
+        let vol_composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("Volumetric Composite BG"),
+            layout:  vol_composite_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ssr_hdr_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&vol_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+            ],
+        });
+
+        // TAA reads from hdr_view (which has been written by vol composite or ssr composite)
         let taa_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:   Some("TAA BG"),
             layout:  taa_bgl,
@@ -1328,8 +1685,10 @@ impl SizeDependentResources {
             gbuffer_albedo_view, gbuffer_normal_view, gbuffer_depth_view, velocity_view,
             hdr_view, ssao_view, ssao_blur_view, bloom_ping_view, bloom_pong_view, ldr_view,
             taa_history_view, taa_output_view, taa_history_tex, taa_output_tex,
+            ssr_view, ssr_hdr_view, vol_view,
             lighting_uniforms_bg, lighting_inputs_bg, ssao_bg, ssao_blur_bg,
             bloom_threshold_bg, bloom_blur_h_bg, bloom_blur_v_bg, tonemap_bg, cas_bg, taa_bg,
+            ssr_bg, ssr_composite_bg, vol_bg, vol_composite_bg,
         }
     }
 }
@@ -1443,6 +1802,47 @@ fn create_noise_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Te
     }, wgpu::util::TextureDataOrder::LayerMajor, &data);
     let view = tex.create_view(&Default::default());
     (tex, view)
+}
+
+fn create_1x1_texture(
+    device: &wgpu::Device,
+    queue:  &wgpu::Queue,
+    pixel:  &[u8; 4],
+    format: wgpu::TextureFormat,
+    label:  &str,
+) -> wgpu::TextureView {
+    let tex = device.create_texture_with_data(queue, &wgpu::TextureDescriptor {
+        label:                Some(label),
+        size:                 wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count:      1,
+        sample_count:         1,
+        dimension:            wgpu::TextureDimension::D2,
+        format,
+        usage:                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats:         &[],
+    }, wgpu::util::TextureDataOrder::LayerMajor, pixel);
+    tex.create_view(&Default::default())
+}
+
+/// Upload an `ExtractedTexture` (from glTF) to the GPU.
+pub fn upload_texture(
+    device: &wgpu::Device,
+    queue:  &wgpu::Queue,
+    et:     &ExtractedTexture,
+    format: wgpu::TextureFormat,
+    label:  &str,
+) -> wgpu::TextureView {
+    let tex = device.create_texture_with_data(queue, &wgpu::TextureDescriptor {
+        label:                Some(label),
+        size:                 wgpu::Extent3d { width: et.width, height: et.height, depth_or_array_layers: 1 },
+        mip_level_count:      1,
+        sample_count:         1,
+        dimension:            wgpu::TextureDimension::D2,
+        format,
+        usage:                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats:         &[],
+    }, wgpu::util::TextureDataOrder::LayerMajor, &et.rgba);
+    tex.create_view(&Default::default())
 }
 
 fn fullscreen_pipeline(

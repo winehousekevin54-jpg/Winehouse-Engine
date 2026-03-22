@@ -1,5 +1,5 @@
 // ============================================================
-// Winehouse Engine — G-Buffer Pass
+// Winehouse Engine — G-Buffer Pass (PBR Textures)
 // Outputs: albedo+roughness (Rgba8Unorm), normal+metallic (Rgba16Float),
 //          velocity (Rgba16Float — screen-space motion vectors)
 // ============================================================
@@ -29,10 +29,16 @@ struct ObjectUniforms {
 
 @group(0) @binding(0) var<uniform> scene:  SceneUniforms;
 @group(1) @binding(0) var<uniform> object: ObjectUniforms;
+@group(1) @binding(1) var t_albedo:    texture_2d<f32>;
+@group(1) @binding(2) var t_normal:    texture_2d<f32>;
+@group(1) @binding(3) var t_mr:        texture_2d<f32>;
+@group(1) @binding(4) var s_material:  sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal:   vec3<f32>,
+    @location(2) uv:       vec2<f32>,
+    @location(3) tangent:  vec4<f32>,
 }
 
 struct VertexOutput {
@@ -40,6 +46,9 @@ struct VertexOutput {
     @location(0)       world_normal:  vec3<f32>,
     @location(1)       curr_ndc_pos:  vec3<f32>,
     @location(2)       prev_ndc_pos:  vec3<f32>,
+    @location(3)       uv:           vec2<f32>,
+    @location(4)       world_tangent: vec3<f32>,
+    @location(5)       tangent_w:     f32,
 }
 
 @vertex
@@ -65,26 +74,49 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         object.model[1].xyz,
         object.model[2].xyz,
     );
-    out.world_normal = normalize(nm * in.normal);
+    out.world_normal  = normalize(nm * in.normal);
+    out.world_tangent = normalize(nm * in.tangent.xyz);
+    out.tangent_w     = in.tangent.w;
+    out.uv            = in.uv;
     return out;
 }
 
 struct GBufferOut {
     @location(0) albedo_roughness: vec4<f32>, // RGB=albedo, A=roughness
-    @location(1) normal_metallic:  vec4<f32>, // RGB=octahedron-encoded normal, A=metallic
+    @location(1) normal_metallic:  vec4<f32>, // RGB=encoded normal, A=metallic
     @location(2) velocity:         vec4<f32>, // RG=screen-space motion in UV space
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> GBufferOut {
     var out: GBufferOut;
-    let roughness = clamp(object.roughness, 0.05, 1.0);
-    // Store linear albedo and roughness
-    out.albedo_roughness = vec4<f32>(object.albedo.rgb, roughness);
-    // Encode normal to [0,1] for Rgba8Unorm-compatible storage
-    out.normal_metallic  = vec4<f32>(normalize(in.world_normal) * 0.5 + 0.5, object.metallic);
-    // Velocity: difference in NDC mapped to UV space (NDC * 0.5)
-    // curr_ndc_pos and prev_ndc_pos are already perspective-divided
+
+    // ── Sample PBR textures ────────────────────────────────────────────────
+    let albedo_sample = textureSample(t_albedo, s_material, in.uv);
+    let mr_sample     = textureSample(t_mr, s_material, in.uv);
+    let normal_sample = textureSample(t_normal, s_material, in.uv);
+
+    // Albedo: texture × uniform tint
+    let albedo = albedo_sample.rgb * object.albedo.rgb;
+
+    // Metallic-roughness: green=roughness, blue=metallic (glTF convention)
+    let roughness = clamp(mr_sample.g * object.roughness, 0.05, 1.0);
+    let metallic  = clamp(mr_sample.b * object.metallic, 0.0, 1.0);
+
+    // ── Normal mapping via TBN matrix ──────────────────────────────────────
+    let N = normalize(in.world_normal);
+    let T = normalize(in.world_tangent);
+    let B = cross(N, T) * in.tangent_w;
+    let TBN = mat3x3<f32>(T, B, N);
+    // Tangent-space normal from texture: remap [0,1] → [-1,1]
+    let ts_normal = normal_sample.rgb * 2.0 - 1.0;
+    let world_normal = normalize(TBN * ts_normal);
+
+    // ── Write G-Buffer ─────────────────────────────────────────────────────
+    out.albedo_roughness = vec4<f32>(albedo, roughness);
+    out.normal_metallic  = vec4<f32>(world_normal * 0.5 + 0.5, metallic);
+
+    // Velocity
     let velocity = (in.curr_ndc_pos.xy - in.prev_ndc_pos.xy) * 0.5;
     out.velocity = vec4<f32>(velocity, 0.0, 0.0);
     return out;
