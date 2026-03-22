@@ -941,7 +941,12 @@ impl SizeDependentResources {
 
         let gbuffer_albedo_view = gbuffer_albedo.create_view(&Default::default());
         let gbuffer_normal_view = gbuffer_normal.create_view(&Default::default());
-        let gbuffer_depth_view  = gbuffer_depth.create_view(&Default::default());
+        // Chrome WebGPU requires aspect:DepthOnly for texture_depth_2d bindings.
+        // Depth32Float has no stencil, so DepthOnly works for render attachments too.
+        let gbuffer_depth_view  = gbuffer_depth.create_view(&wgpu::TextureViewDescriptor {
+            aspect: wgpu::TextureAspect::DepthOnly,
+            ..Default::default()
+        });
         let hdr_view            = hdr.create_view(&Default::default());
         let ssao_view           = ssao.create_view(&Default::default());
         let ssao_blur_view      = ssao_blur.create_view(&Default::default());
@@ -1098,7 +1103,11 @@ fn create_shadow_map(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView
         usage:                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats:         &[],
     });
-    let view = tex.create_view(&Default::default());
+    // DepthOnly required by Chrome WebGPU for both render attachments and shader bindings.
+    let view = tex.create_view(&wgpu::TextureViewDescriptor {
+        aspect: wgpu::TextureAspect::DepthOnly,
+        ..Default::default()
+    });
     (tex, view)
 }
 
