@@ -5,6 +5,9 @@ import wasm from 'vite-plugin-wasm';
 export default defineConfig({
   base: process.env.BASE_URL ?? '/',
   plugins: [react(), wasm()],
+  optimizeDeps: {
+    include: ['zustand', 'zustand/react'],
+  },
   server: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
