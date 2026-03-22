@@ -138,12 +138,13 @@ function Dropdown({ entries, onClose }: { entries: MenuEntry[]; onClose: () => v
 
 // ── Single top-level menu ──────────────────────────────────────────────────────
 
-function TopMenu({ label, entries, isOpen, onOpen, onClose }: {
+function TopMenu({ label, entries, isOpen, onOpen, onClose, anyOpen }: {
   label: string;
   entries: MenuEntry[];
   isOpen: boolean;
   onOpen: () => void;
   onClose: () => void;
+  anyOpen: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -155,7 +156,7 @@ function TopMenu({ label, entries, isOpen, onOpen, onClose }: {
           background: isOpen ? 'rgba(255,255,255,0.12)' : 'transparent',
           color: isOpen ? '#fff' : '#d8d8e8',
         }}
-        onMouseEnter={onOpen}
+        onMouseEnter={anyOpen && !isOpen ? onOpen : undefined}
         onClick={isOpen ? onClose : onOpen}
       >
         {label}
@@ -207,6 +208,7 @@ export function MenuBar({ menus, statusLabel, statusColor }: Props) {
           isOpen={openMenu === i}
           onOpen={() => setOpenMenu(i)}
           onClose={closeAll}
+          anyOpen={openMenu !== null}
         />
       ))}
 
