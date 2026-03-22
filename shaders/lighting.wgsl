@@ -217,7 +217,25 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let specular = (NDF * G * F) / denom;
 
     let Lo      = (kD * albedo / PI + specular) * scene.light_color * NdotL * shadow;
-    let ambient = scene.ambient_color * albedo * ssao;
+
+    // ── Hemisphere ambient (simulates open-sky IBL without an env texture) ──────
+    // Sky colour (blue-white) for upward-facing normals; warm ground for downward.
+    // Reflection direction is used for metallic specular approximation.
+    let sky_col    = vec3<f32>(0.55, 0.65, 0.85);   // daylight sky
+    let ground_col = vec3<f32>(0.06, 0.05, 0.04);   // dark earth
+    let t_diff     = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+    let hemi_diff  = mix(ground_col, sky_col, t_diff);
+
+    // Fake env specular: sample hemisphere in reflection direction
+    let R          = reflect(-V, N);
+    let t_spec     = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
+    let hemi_spec  = mix(ground_col, sky_col, t_spec);
+
+    // Split-sum ambient: dielectric uses diffuse hemi, metallic reflects hemi
+    let kD_amb     = (1.0 - metallic);
+    let amb_diff   = hemi_diff * albedo * kD_amb;
+    let amb_spec   = hemi_spec * F0 * (1.0 - roughness * roughness);
+    let ambient    = (amb_diff + amb_spec) * ssao;
 
     return vec4<f32>(ambient + Lo, 1.0);
 }

@@ -27,12 +27,18 @@ pub struct ExtractedTexture {
     pub height: u32,
 }
 
-/// Result of loading a glTF file: mesh + optional PBR textures.
+/// Result of loading a glTF file: mesh + optional PBR textures + material factors.
 pub struct GltfLoadResult {
     pub mesh: GpuMesh,
     pub albedo_tex: Option<ExtractedTexture>,
     pub normal_tex: Option<ExtractedTexture>,
     pub metallic_roughness_tex: Option<ExtractedTexture>,
+    /// glTF base_color_factor (default [1,1,1,1]) — multiplied with albedo texture
+    pub base_color_factor: [f32; 4],
+    /// glTF metallic_factor (default 1.0) — scalar multiplier for metallic channel
+    pub metallic_factor: f32,
+    /// glTF roughness_factor (default 1.0) — scalar multiplier for roughness channel
+    pub roughness_factor: f32,
 }
 
 impl GpuMesh {
@@ -158,6 +164,12 @@ impl GpuMesh {
                     pbr.metallic_roughness_texture().map(|t| t.texture().source().index()),
                 );
 
+                // Read glTF scalar material factors (default: bcf=[1,1,1,1], m=1, r=1)
+                let bcf = pbr.base_color_factor();
+                let base_color_factor  = [bcf[0], bcf[1], bcf[2], bcf[3]];
+                let metallic_factor    = pbr.metallic_factor();
+                let roughness_factor   = pbr.roughness_factor();
+
                 results.push(GltfLoadResult {
                     mesh: GpuMesh {
                         vertex_buffer,
@@ -168,6 +180,9 @@ impl GpuMesh {
                     albedo_tex,
                     normal_tex,
                     metallic_roughness_tex,
+                    base_color_factor,
+                    metallic_factor,
+                    roughness_factor,
                 });
             }
         }

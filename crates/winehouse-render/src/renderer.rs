@@ -1024,13 +1024,18 @@ impl Renderer {
                 format!("{}_{}", name, i)
             };
 
+            // Use glTF material factors: base_color_factor tints the albedo,
+            // metallic/roughness_factor scale the MR texture (or the constant value
+            // when no MR texture is present). This makes materials match the glTF spec.
+            let bcf = result.base_color_factor;
             let info = SceneObjectInfo {
                 id, name: obj_name,
                 position: [0.0, 0.0, 0.0],
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale:    [1.0, 1.0, 1.0],
-                albedo:   [1.0, 1.0, 1.0],
-                metallic: 1.0, roughness: 1.0,
+                albedo:   [bcf[0], bcf[1], bcf[2]],
+                metallic: result.metallic_factor,
+                roughness: result.roughness_factor,
             };
             self.push_object(info, result.mesh, &albedo_view, &normal_view, &mr_view);
         }
