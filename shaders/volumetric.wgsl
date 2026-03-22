@@ -97,11 +97,15 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
 
 @fragment
 fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
-    // Half-res: use frag_coord directly (render target is already half-size)
-    let dims = vec2<f32>(textureDimensions(t_depth));
-    let uv = frag_coord.xy / (dims * 0.5);
-
-    let depth = textureSample(t_depth, s_repeat, uv);
+    // Renders at half-resolution; t_depth is full-resolution.
+    // Map half-res frag_coord to full-res for depth lookup.
+    let depth_dims = vec2<i32>(textureDimensions(t_depth));
+    let depth_pixel = vec2<i32>(frag_coord.xy) * 2;
+    let clamped_pixel = clamp(depth_pixel, vec2<i32>(0), depth_dims - vec2<i32>(1));
+    // textureLoad — no sampler needed, safe with depth textures
+    let depth = textureLoad(t_depth, clamped_pixel, 0);
+    // Reconstruct UV at full resolution for world-position
+    let uv = (vec2<f32>(clamped_pixel) + 0.5) / vec2<f32>(depth_dims);
     let world_pos = world_from_depth(uv, depth);
 
     let ray_origin = scene.camera_pos;
@@ -110,7 +114,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
 
     // Dither ray start with noise to reduce banding
     let noise_uv = frag_coord.xy / 4.0;
-    let noise_val = textureSample(t_noise, s_repeat, noise_uv).r;
+    let noise_val = textureSampleLevel(t_noise, s_repeat, noise_uv, 0.0).r;
 
     let step_count = u32(vol.steps);
     let step_len   = ray_length / f32(step_count);

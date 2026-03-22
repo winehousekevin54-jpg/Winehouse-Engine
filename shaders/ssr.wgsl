@@ -28,16 +28,15 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
 }
 
-// Reconstruct world position from depth + UV
 fn world_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
-    // WebGPU NDC: x,y ∈ [-1,1], z ∈ [0,1]
     let ndc = vec4<f32>(uv * 2.0 - 1.0, depth, 1.0);
     let world = ssr.inv_view_proj * ndc;
     return world.xyz / world.w;
 }
 
-fn linearize_depth(d: f32) -> f32 {
-    return ssr.near * ssr.far / (ssr.far - d * (ssr.far - ssr.near));
+// textureLoad on depth — no sampler, safe in non-uniform control flow
+fn load_depth(pixel: vec2<i32>) -> f32 {
+    return textureLoad(t_depth, pixel, 0);
 }
 
 const MAX_STEPS: u32 = 48u;
@@ -47,16 +46,17 @@ const THICKNESS: f32 = 0.15;
 @fragment
 fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = frag_coord.xy / ssr.viewport;
-    let depth = textureSample(t_depth, s_point, uv);
+    let pixel = vec2<i32>(frag_coord.xy);
+    let depth = load_depth(pixel);
 
     // Skip sky pixels
     if depth >= 1.0 {
         return vec4<f32>(0.0);
     }
 
-    // Read G-Buffer
-    let normal_sample = textureSample(t_normal, s_linear, uv);
-    let albedo_sample = textureSample(t_albedo, s_linear, uv);
+    // Read G-Buffer (textureSampleLevel — safe in non-uniform control flow)
+    let normal_sample = textureSampleLevel(t_normal, s_linear, uv, 0.0);
+    let albedo_sample = textureSampleLevel(t_albedo, s_linear, uv, 0.0);
     let world_normal = normalize(normal_sample.rgb * 2.0 - 1.0);
     let metallic   = normal_sample.a;
     let roughness  = albedo_sample.a;
@@ -81,30 +81,31 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let end_ndc    = end_clip.xyz / end_clip.w;
     let end_screen = end_ndc.xy * 0.5 + 0.5;
 
-    var ray_screen = end_screen - start_screen;
+    let ray_screen = end_screen - start_screen;
     let ray_depth  = end_ndc.z - start_ndc.z;
 
-    // Step along the ray
     let step_size = 1.0 / f32(MAX_STEPS);
     var hit_uv = vec2<f32>(0.0);
     var hit = false;
+    var hit_t = 0.0;
 
     for (var i = 0u; i < MAX_STEPS; i = i + 1u) {
         let t = (f32(i) + 0.5) * step_size;
         let sample_uv = start_screen + ray_screen * t;
         let sample_z  = start_ndc.z + ray_depth * t;
 
-        // Out of screen bounds
         if sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0 {
             break;
         }
 
-        let scene_depth = textureSample(t_depth, s_point, sample_uv);
+        let sample_pixel = vec2<i32>(sample_uv * ssr.viewport);
+        let scene_depth = load_depth(sample_pixel);
         if scene_depth >= 1.0 { continue; }
 
         let depth_diff = sample_z - scene_depth;
         if depth_diff > 0.0 && depth_diff < THICKNESS {
             hit_uv = sample_uv;
+            hit_t = t;
             hit = true;
             break;
         }
@@ -114,27 +115,16 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    // Binary refinement
-    var lo = max((f32(0u)) * step_size, 0.0);
-    // Find the step that hit
-    for (var i = 0u; i < MAX_STEPS; i = i + 1u) {
-        let t = (f32(i) + 0.5) * step_size;
-        let sample_uv_check = start_screen + ray_screen * t;
-        let sample_z_check  = start_ndc.z + ray_depth * t;
-        let scene_depth_check = textureSample(t_depth, s_point, sample_uv_check);
-        let depth_diff_check = sample_z_check - scene_depth_check;
-        if depth_diff_check > 0.0 && depth_diff_check < THICKNESS {
-            lo = max(t - step_size, 0.0);
-            break;
-        }
-    }
-    var hi = lo + step_size;
+    // Binary refinement around the hit
+    var lo = max(hit_t - step_size, 0.0);
+    var hi = hit_t;
 
     for (var b = 0u; b < BINARY_STEPS; b = b + 1u) {
         let mid = (lo + hi) * 0.5;
         let mid_uv = start_screen + ray_screen * mid;
         let mid_z  = start_ndc.z + ray_depth * mid;
-        let mid_depth = textureSample(t_depth, s_point, mid_uv);
+        let mid_pixel = vec2<i32>(mid_uv * ssr.viewport);
+        let mid_depth = load_depth(mid_pixel);
         if mid_z > mid_depth {
             hi = mid;
         } else {
@@ -143,8 +133,8 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     }
     hit_uv = start_screen + ray_screen * ((lo + hi) * 0.5);
 
-    // Fetch reflected color
-    let reflected = textureSample(t_hdr, s_linear, hit_uv);
+    // Fetch reflected color (textureSampleLevel — safe in non-uniform flow)
+    let reflected = textureSampleLevel(t_hdr, s_linear, hit_uv, 0.0);
 
     // Confidence: fade at screen borders and based on roughness
     let border = smoothstep(0.0, 0.05, hit_uv.x) * smoothstep(1.0, 0.95, hit_uv.x)

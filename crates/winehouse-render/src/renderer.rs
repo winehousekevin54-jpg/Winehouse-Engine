@@ -262,8 +262,8 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(canvas: web_sys::HtmlCanvasElement) -> Result<Self, String> {
-        let width  = canvas.client_width() as u32;
-        let height = canvas.client_height() as u32;
+        let width  = (canvas.client_width() as u32).max(1);
+        let height = (canvas.client_height() as u32).max(1);
         canvas.set_width(width);
         canvas.set_height(height);
 
