@@ -58,82 +58,19 @@ impl GpuMesh {
         }
     }
 
-    /// Parse a GLB/glTF binary blob, extract the first primitive.
-    /// Flat normals are generated if the file has none.
-    pub fn from_gltf_bytes(device: &wgpu::Device, data: &[u8]) -> Result<GltfLoadResult, String> {
+    /// Parse a GLB/glTF binary blob.
+    /// Returns one GltfLoadResult per mesh×primitive so multi-mesh character
+    /// models (body + clothing + accessories) are fully loaded.
+    pub fn from_gltf_bytes(device: &wgpu::Device, data: &[u8]) -> Result<Vec<GltfLoadResult>, String> {
         let (document, buffers, images) =
             gltf::import_slice(data).map_err(|e| format!("glTF parse error: {e}"))?;
 
-        let gltf_mesh = document
-            .meshes()
-            .next()
-            .ok_or_else(|| "No mesh found in glTF".to_string())?;
-
-        let primitive = gltf_mesh
-            .primitives()
-            .next()
-            .ok_or_else(|| "No primitive found in mesh".to_string())?;
-
-        let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
-
-        let positions: Vec<[f32; 3]> = reader
-            .read_positions()
-            .ok_or_else(|| "Missing vertex positions".to_string())?
-            .collect();
-
-        let indices: Vec<u32> = match reader.read_indices() {
-            Some(iter) => iter.into_u32().collect(),
-            None => (0..positions.len() as u32).collect(),
-        };
-
-        let normals: Vec<[f32; 3]> = match reader.read_normals() {
-            Some(iter) => iter.collect(),
-            None => generate_flat_normals(&positions, &indices),
-        };
-
-        let uvs: Vec<[f32; 2]> = match reader.read_tex_coords(0) {
-            Some(iter) => iter.into_f32().collect(),
-            None => vec![[0.0, 0.0]; positions.len()],
-        };
-
-        let tangents: Vec<[f32; 4]> = match reader.read_tangents() {
-            Some(iter) => iter.collect(),
-            None => normals.iter().map(|n| tangent_from_normal(*n)).collect(),
-        };
-
-        let vertices: Vec<Vertex> = positions
-            .iter()
-            .zip(normals.iter())
-            .zip(uvs.iter())
-            .zip(tangents.iter())
-            .map(|(((p, n), uv), t)| Vertex {
-                position: *p,
-                normal:   *n,
-                uv:       *uv,
-                tangent:  *t,
-            })
-            .collect();
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("glTF VB"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("glTF IB"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        // Extract PBR textures from the material (if any)
-        let material = primitive.material();
-        let pbr = material.pbr_metallic_roughness();
-
+        // Helper: convert any glTF image format to Rgba8
         let extract_image = |tex_info_idx: Option<usize>| -> Option<ExtractedTexture> {
             let idx = tex_info_idx?;
             let img = images.get(idx)?;
             let (w, h) = (img.width, img.height);
-            let rgba = match img.format {
+            let rgba: Vec<u8> = match img.format {
                 gltf::image::Format::R8G8B8A8 => img.pixels.clone(),
                 gltf::image::Format::R8G8B8 => {
                     let mut out = Vec::with_capacity((w * h * 4) as usize);
@@ -143,34 +80,103 @@ impl GpuMesh {
                     }
                     out
                 }
+                gltf::image::Format::R8 => {
+                    // Grayscale → RGBA (e.g. occlusion maps)
+                    img.pixels.iter().flat_map(|&v| [v, v, v, 255]).collect()
+                }
+                gltf::image::Format::R8G8 => {
+                    // RG → RGBA (e.g. some metallic-roughness packs)
+                    img.pixels.chunks(2).flat_map(|c| [c[0], c[1], 0, 255]).collect()
+                }
                 _ => return None,
             };
             Some(ExtractedTexture { rgba, width: w, height: h })
         };
 
-        let albedo_tex = extract_image(
-            pbr.base_color_texture().map(|t| t.texture().source().index()),
-        );
-        let normal_tex = extract_image(
-            material.normal_texture().map(|t| t.texture().source().index()),
-        );
-        let metallic_roughness_tex = extract_image(
-            pbr.metallic_roughness_texture().map(|t| t.texture().source().index()),
-        );
+        let mut results = Vec::new();
 
-        let mesh = GpuMesh {
-            vertex_buffer,
-            index_buffer,
-            index_count: indices.len() as u32,
-            index_format: wgpu::IndexFormat::Uint32,
-        };
+        for gltf_mesh in document.meshes() {
+            for primitive in gltf_mesh.primitives() {
+                let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
 
-        Ok(GltfLoadResult {
-            mesh,
-            albedo_tex,
-            normal_tex,
-            metallic_roughness_tex,
-        })
+                let positions: Vec<[f32; 3]> = match reader.read_positions() {
+                    Some(iter) => iter.collect(),
+                    None => continue, // skip degenerate primitives
+                };
+
+                let indices: Vec<u32> = match reader.read_indices() {
+                    Some(iter) => iter.into_u32().collect(),
+                    None => (0..positions.len() as u32).collect(),
+                };
+
+                let normals: Vec<[f32; 3]> = match reader.read_normals() {
+                    Some(iter) => iter.collect(),
+                    None => generate_flat_normals(&positions, &indices),
+                };
+
+                let uvs: Vec<[f32; 2]> = match reader.read_tex_coords(0) {
+                    Some(iter) => iter.into_f32().collect(),
+                    None => vec![[0.0, 0.0]; positions.len()],
+                };
+
+                let tangents: Vec<[f32; 4]> = match reader.read_tangents() {
+                    Some(iter) => iter.collect(),
+                    None => normals.iter().map(|n| tangent_from_normal(*n)).collect(),
+                };
+
+                let vertices: Vec<Vertex> = positions
+                    .iter()
+                    .zip(normals.iter())
+                    .zip(uvs.iter())
+                    .zip(tangents.iter())
+                    .map(|(((p, n), uv), t)| Vertex {
+                        position: *p, normal: *n, uv: *uv, tangent: *t,
+                    })
+                    .collect();
+
+                let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("glTF VB"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("glTF IB"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                let material = primitive.material();
+                let pbr = material.pbr_metallic_roughness();
+
+                let albedo_tex = extract_image(
+                    pbr.base_color_texture().map(|t| t.texture().source().index()),
+                );
+                let normal_tex = extract_image(
+                    material.normal_texture().map(|t| t.texture().source().index()),
+                );
+                let metallic_roughness_tex = extract_image(
+                    pbr.metallic_roughness_texture().map(|t| t.texture().source().index()),
+                );
+
+                results.push(GltfLoadResult {
+                    mesh: GpuMesh {
+                        vertex_buffer,
+                        index_buffer,
+                        index_count: indices.len() as u32,
+                        index_format: wgpu::IndexFormat::Uint32,
+                    },
+                    albedo_tex,
+                    normal_tex,
+                    metallic_roughness_tex,
+                });
+            }
+        }
+
+        if results.is_empty() {
+            return Err("No valid primitives found in glTF".to_string());
+        }
+
+        Ok(results)
     }
 }
 

@@ -888,33 +888,45 @@ impl Renderer {
     }
 
     pub fn load_gltf(&mut self, data: &[u8], name: &str) -> Result<u64, String> {
-        let id   = self.next_id;
-        self.next_id += 1;
-        let result = GpuMesh::from_gltf_bytes(&self.device, data)?;
+        let first_id = self.next_id;
+        let results = GpuMesh::from_gltf_bytes(&self.device, data)?;
 
-        let albedo_view = match &result.albedo_tex {
-            Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8UnormSrgb, "glTF Albedo"),
-            None => self.default_albedo_view.clone(),
-        };
-        let normal_view = match &result.normal_tex {
-            Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8Unorm, "glTF Normal"),
-            None => self.default_normal_view.clone(),
-        };
-        let mr_view = match &result.metallic_roughness_tex {
-            Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8Unorm, "glTF MR"),
-            None => self.default_mr_view.clone(),
-        };
+        for (i, result) in results.into_iter().enumerate() {
+            let id = self.next_id;
+            self.next_id += 1;
 
-        let info = SceneObjectInfo {
-            id, name: name.to_string(),
-            position: [0.0, 0.0, 0.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale:    [1.0, 1.0, 1.0],
-            albedo:   [1.0, 1.0, 1.0],
-            metallic: 1.0, roughness: 1.0,
-        };
-        self.push_object(info, result.mesh, &albedo_view, &normal_view, &mr_view);
-        Ok(id)
+            let albedo_view = match &result.albedo_tex {
+                Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8UnormSrgb, "glTF Albedo"),
+                None => self.default_albedo_view.clone(),
+            };
+            let normal_view = match &result.normal_tex {
+                Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8Unorm, "glTF Normal"),
+                None => self.default_normal_view.clone(),
+            };
+            let mr_view = match &result.metallic_roughness_tex {
+                Some(et) => upload_texture(&self.device, &self.queue, et, wgpu::TextureFormat::Rgba8Unorm, "glTF MR"),
+                None => self.default_mr_view.clone(),
+            };
+
+            // First primitive uses the given name; extras get a suffix
+            let obj_name = if i == 0 {
+                name.to_string()
+            } else {
+                format!("{}_{}", name, i)
+            };
+
+            let info = SceneObjectInfo {
+                id, name: obj_name,
+                position: [0.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale:    [1.0, 1.0, 1.0],
+                albedo:   [1.0, 1.0, 1.0],
+                metallic: 1.0, roughness: 1.0,
+            };
+            self.push_object(info, result.mesh, &albedo_view, &normal_view, &mr_view);
+        }
+
+        Ok(first_id)
     }
 
     fn push_object(
@@ -1060,7 +1072,7 @@ impl Renderer {
 
         // Update CAS uniforms
         self.queue.write_buffer(&self.cas_buffer, 0, bytemuck::bytes_of(&CasUniforms {
-            sharpness: 0.5,
+            sharpness: 0.85, // Higher value = stronger sharpening to counteract TAA blur
             _pad:      [0.0; 3],
         }));
 
