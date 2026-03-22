@@ -64,10 +64,17 @@ export function SceneView() {
     isDragging.current = false;
   }, []);
 
-  const onWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    // Zoom: negative delta = zoom in
-    cameraZoom(-e.deltaY * 0.001);
+  // Must use a native listener with { passive: false } — React's onWheel is passive
+  // and cannot call preventDefault(), causing the browser page to zoom as well.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      cameraZoom(-e.deltaY * 0.001);
+    };
+    canvas.addEventListener('wheel', handler, { passive: false });
+    return () => canvas.removeEventListener('wheel', handler);
   }, []);
 
   return (
@@ -80,7 +87,6 @@ export function SceneView() {
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
-        onWheel={onWheel}
       />
       {engineStatus === 'loading' && (
         <div style={{
