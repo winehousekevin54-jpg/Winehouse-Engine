@@ -131,8 +131,6 @@ pub struct Renderer {
 
     // Bind group layouts
     object_bgl:           wgpu::BindGroupLayout,
-    scene_bgl:            wgpu::BindGroupLayout,
-    shadow_pass_bgl:      wgpu::BindGroupLayout,
     lighting_uniforms_bgl: wgpu::BindGroupLayout,
     lighting_inputs_bgl:  wgpu::BindGroupLayout,
     ssao_inputs_bgl:      wgpu::BindGroupLayout,
@@ -319,8 +317,8 @@ impl Renderer {
         });
 
         // ── Fixed textures ─────────────────────────────────────────────────────
-        let (shadow_map_tex, shadow_map_view) = create_shadow_map(&device);
-        let (noise_tex, noise_view) = create_noise_texture(&device, &queue);
+        let (_shadow_map_tex, shadow_map_view) = create_shadow_map(&device);
+        let (_noise_tex, noise_view) = create_noise_texture(&device, &queue);
 
         // ── Bind group layouts ─────────────────────────────────────────────────
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -570,8 +568,6 @@ impl Renderer {
             bloom_v_buffer: bloom_v_buf,
             taa_buffer,
             object_bgl,
-            scene_bgl,
-            shadow_pass_bgl,
             lighting_uniforms_bgl,
             lighting_inputs_bgl,
             ssao_inputs_bgl,
