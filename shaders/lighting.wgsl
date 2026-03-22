@@ -40,7 +40,7 @@ struct LightingUniforms {
 @group(1) @binding(6) var linear_sampler:         sampler;
 
 const PI: f32 = 3.14159265358979;
-const SHADOW_BIAS: f32 = 0.003;
+const SHADOW_BIAS: f32 = 0.005;
 const SHADOW_SIZE: f32 = 2048.0;
 
 // ── PBR helpers ───────────────────────────────────────────────────────────────

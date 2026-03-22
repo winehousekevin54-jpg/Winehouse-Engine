@@ -603,7 +603,9 @@ impl Renderer {
                 fragment: None,
                 primitive: wgpu::PrimitiveState {
                     topology:    wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode:   Some(wgpu::Face::Front), // front-face culling reduces peter-panning
+                    // None = double-sided shadows: required for complex models where
+                    // front-face culling causes entire cascade areas to appear fully shadowed
+                    cull_mode:   None,
                     front_face:  wgpu::FrontFace::Ccw,
                     ..Default::default()
                 },
@@ -1024,7 +1026,7 @@ impl Renderer {
             _pad1:                0.0,
             light_color:          [1.2, 1.1, 1.0],
             _pad2:                0.0,
-            ambient_color:        [0.06, 0.06, 0.09],
+            ambient_color:        [0.12, 0.12, 0.16],
             _pad3:                0.0,
         }));
 
@@ -1984,7 +1986,7 @@ fn make_object_uniforms(info: &SceneObjectInfo, prev_model: Mat4) -> ObjectUnifo
 // ── Cascade Shadow Map helpers ────────────────────────────────────────────────
 
 const NUM_CASCADES: usize = 4;
-const SHADOW_DISTANCE: f32 = 50.0;
+const SHADOW_DISTANCE: f32 = 300.0;
 const CASCADE_LAMBDA: f32 = 0.75;
 
 fn compute_cascade_splits(near: f32, far: f32) -> [f32; 4] {

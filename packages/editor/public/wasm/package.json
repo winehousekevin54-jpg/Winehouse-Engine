@@ -1,0 +1,15 @@
+{
+  "name": "winehouse-wasm-bridge",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "winehouse_wasm_bridge_bg.wasm",
+    "winehouse_wasm_bridge.js",
+    "winehouse_wasm_bridge.d.ts"
+  ],
+  "main": "winehouse_wasm_bridge.js",
+  "types": "winehouse_wasm_bridge.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
