@@ -64,13 +64,13 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
 }
 
 @fragment
-fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) f32 {
+fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let uv    = frag_coord.xy / lighting.viewport;
     let texel = vec2<i32>(frag_coord.xy);
     let depth = textureLoad(gbuffer_depth, texel, 0);
 
     // Sky: no occlusion
-    if (depth >= 1.0) { return 1.0; }
+    if (depth >= 1.0) { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
 
     let world_pos = reconstruct_world(uv, depth);
     let normal    = normalize(textureLoad(gbuffer_normal, texel, 0).rgb * 2.0 - 1.0);
@@ -110,5 +110,5 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) f32 {
         }
     }
 
-    return 1.0 - (occlusion / f32(KERNEL_SIZE));
+    return vec4<f32>(1.0 - (occlusion / f32(KERNEL_SIZE)), 0.0, 0.0, 1.0);
 }

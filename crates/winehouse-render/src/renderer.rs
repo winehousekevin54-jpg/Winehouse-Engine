@@ -447,12 +447,12 @@ impl Renderer {
         let ssao_pipeline = fullscreen_pipeline(
             &device, &sh_ssao, "SSAO",
             &[&lighting_uniforms_bgl, &ssao_inputs_bgl],
-            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
         let ssao_blur_pipeline = fullscreen_pipeline(
             &device, &sh_ssao_blur, "SSAO Blur",
             &[&ssao_blur_bgl],
-            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
         let bloom_threshold_pipeline = fullscreen_pipeline(
             &device, &sh_bloom_th, "Bloom Threshold",
@@ -1075,8 +1075,10 @@ fn tex2d(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat, lab
     })
 }
 
+// R8Unorm is NOT a required RENDER_ATTACHMENT format in WebGPU (Chrome rejects it).
+// Use Rgba8Unorm instead — the occlusion value lives in the R channel.
 fn tex2d_r8(device: &wgpu::Device, w: u32, h: u32, label: &str) -> wgpu::Texture {
-    tex2d(device, w, h, wgpu::TextureFormat::R8Unorm, label)
+    tex2d(device, w, h, wgpu::TextureFormat::Rgba8Unorm, label)
 }
 
 fn depth_tex(device: &wgpu::Device, w: u32, h: u32, label: &str) -> wgpu::Texture {

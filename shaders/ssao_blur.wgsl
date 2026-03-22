@@ -17,7 +17,7 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
 }
 
 @fragment
-fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) f32 {
+fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let texel = vec2<i32>(frag_coord.xy);
     var result = 0.0;
     for (var x = -2; x <= 2; x++) {
@@ -26,5 +26,5 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) f32 {
             result += textureLoad(ssao_tex, texel + offset, 0).r;
         }
     }
-    return result / 25.0;
+    return vec4<f32>(result / 25.0, 0.0, 0.0, 1.0);
 }
