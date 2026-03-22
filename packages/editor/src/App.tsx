@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useState } from 'react';
-import { initEngine, getSceneObjects } from './bridge/EngineAPI';
+import { initEngine, getSceneObjects, resizeViewport } from './bridge/EngineAPI';
 import { useEditorStore } from './store/editor';
 import { syncScene } from './commands';
 import { MenuBar } from './components/MenuBar';
@@ -30,6 +30,19 @@ export function App() {
         await initEngine('viewport');
         if (cancelled) return;
         addLog('Engine initialized — WebGPU ready.');
+        // Force resize to the real canvas size after init — the engine
+        // may have been initialized before the layout was finalized.
+        const canvas = document.getElementById('viewport') as HTMLCanvasElement | null;
+        if (canvas) {
+          const dpr = window.devicePixelRatio || 1;
+          const w = Math.round(canvas.clientWidth * dpr);
+          const h = Math.round(canvas.clientHeight * dpr);
+          if (w > 0 && h > 0) {
+            canvas.width = w;
+            canvas.height = h;
+            resizeViewport(w, h);
+          }
+        }
         setEntities(getSceneObjects());
         setEngineStatus('running');
       } catch (e) {
