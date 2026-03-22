@@ -519,9 +519,10 @@ impl Renderer {
         let vol_composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("Volumetric Composite BGL"),
             entries: &[
-                bgl_texture_2d(0),   // HDR (ssr_hdr)
-                bgl_texture_2d(1),   // Volumetric result
-                bgl_sampler(2),      // Linear sampler
+                bgl_texture_2d(0),      // HDR (ssr_hdr)
+                bgl_texture_2d(1),      // Volumetric result (half-res)
+                bgl_depth_texture(2),   // Full-res G-Buffer depth (bilateral weights)
+                bgl_sampler(3),         // Linear sampler
             ],
         });
 
@@ -1663,7 +1664,8 @@ impl SizeDependentResources {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ssr_hdr_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&vol_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(linear_sampler) },
             ],
         });
 

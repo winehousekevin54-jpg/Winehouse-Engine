@@ -124,7 +124,9 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let cos_theta = dot(ray_dir, L);
     let phase = henyey_greenstein(cos_theta, vol.g_factor);
 
-    var accumulated = vec3<f32>(0.0);
+    var accumulated    = vec3<f32>(0.0);
+    var transmittance  = 1.0;
+    // Beer-Lambert: how much light survives one step through the participating medium
     let transmittance_step = exp(-vol.density * step_len);
 
     for (var i = 0u; i < step_count; i = i + 1u) {
@@ -132,12 +134,12 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         let sample_pos = ray_origin + ray_dir * t;
 
         let vis = shadow_visibility(sample_pos);
-        let in_scatter = vol.scattering * phase * vis * scene.light_color;
-        accumulated += in_scatter * step_len;
+        let in_scatter = vol.scattering * vol.density * phase * vis * scene.light_color;
+        // Weight contribution by remaining transmittance along the ray
+        accumulated += in_scatter * step_len * transmittance;
+        // Attenuate for subsequent samples (Beer-Lambert)
+        transmittance *= transmittance_step;
     }
-
-    // Apply density attenuation
-    accumulated *= vol.density;
 
     return vec4<f32>(accumulated, 1.0);
 }
