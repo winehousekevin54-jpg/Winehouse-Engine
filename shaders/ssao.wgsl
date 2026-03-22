@@ -13,7 +13,9 @@ struct LightingUniforms {
     far:             f32,
 }
 
-@group(0) @binding(0) var<uniform> lighting:      LightingUniforms;
+// binding(1) = lighting_buffer in lighting_uniforms_bg
+// (binding(0) = scene_buffer which is SceneUniforms, not needed here)
+@group(0) @binding(1) var<uniform> lighting:      LightingUniforms;
 @group(1) @binding(0) var gbuffer_normal:          texture_2d<f32>;
 @group(1) @binding(1) var gbuffer_depth:           texture_depth_2d;
 @group(1) @binding(2) var noise_tex:               texture_2d<f32>;
