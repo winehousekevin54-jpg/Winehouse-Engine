@@ -119,6 +119,7 @@ pub struct Renderer {
     bloom_threshold_bgl:  wgpu::BindGroupLayout,
     bloom_blur_bgl:       wgpu::BindGroupLayout,
     tonemap_bgl:          wgpu::BindGroupLayout,
+    fxaa_bgl:             wgpu::BindGroupLayout,
 
     // Scene uniform bind group (shared across G-Buffer + shadow)
     scene_bg:         wgpu::BindGroup,
@@ -133,6 +134,7 @@ pub struct Renderer {
     bloom_blur_h_bg:      wgpu::BindGroup,
     bloom_blur_v_bg:      wgpu::BindGroup,
     tonemap_bg:           wgpu::BindGroup,
+    fxaa_bg:              wgpu::BindGroup,
 
     // Size-dependent textures
     gbuffer_albedo_view:    wgpu::TextureView,
@@ -143,6 +145,7 @@ pub struct Renderer {
     ssao_blur_view:         wgpu::TextureView,
     bloom_ping_view:        wgpu::TextureView,
     bloom_pong_view:        wgpu::TextureView,
+    ldr_view:               wgpu::TextureView,
 
     // Fixed textures
     shadow_map_view:    wgpu::TextureView,
@@ -163,6 +166,7 @@ pub struct Renderer {
     bloom_threshold_pipeline:  wgpu::RenderPipeline,
     bloom_blur_pipeline:       wgpu::RenderPipeline,
     tonemap_pipeline:          wgpu::RenderPipeline,
+    fxaa_pipeline:             wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -228,6 +232,7 @@ impl Renderer {
         let sh_bloom_th = shader(&device, include_str!("../../../shaders/bloom_threshold.wgsl"), "Bloom Threshold");
         let sh_bloom_bl = shader(&device, include_str!("../../../shaders/bloom_blur.wgsl"),      "Bloom Blur");
         let sh_tonemap  = shader(&device, include_str!("../../../shaders/tonemap.wgsl"),  "Tonemap");
+        let sh_fxaa     = shader(&device, include_str!("../../../shaders/fxaa.wgsl"),     "FXAA");
 
         // ── Samplers ───────────────────────────────────────────────────────────
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -342,6 +347,10 @@ impl Renderer {
         let tonemap_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("Tonemap BGL"),
             entries: &[bgl_texture_2d(0), bgl_texture_2d(1), bgl_sampler(2)],
+        });
+        let fxaa_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("FXAA BGL"),
+            entries: &[bgl_texture_2d(0), bgl_sampler(1)],
         });
 
         // ── Fixed bind groups ──────────────────────────────────────────────────
@@ -464,9 +473,15 @@ impl Renderer {
             &[&bloom_blur_bgl],
             &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
+        // Tonemap → LDR intermediate (Rgba8Unorm); FXAA reads this and writes to swapchain
         let tonemap_pipeline = fullscreen_pipeline(
             &device, &sh_tonemap, "Tonemap",
             &[&tonemap_bgl],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        );
+        let fxaa_pipeline = fullscreen_pipeline(
+            &device, &sh_fxaa, "FXAA",
+            &[&fxaa_bgl],
             &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
 
@@ -484,7 +499,7 @@ impl Renderer {
             &lighting_uniforms_bgl, &lighting_inputs_bgl,
             &ssao_inputs_bgl, &ssao_blur_bgl,
             &bloom_threshold_bgl, &bloom_blur_bgl,
-            &tonemap_bgl,
+            &tonemap_bgl, &fxaa_bgl,
             &bloom_h_buf, &bloom_v_buf,
         );
 
@@ -512,6 +527,7 @@ impl Renderer {
             bloom_threshold_bgl,
             bloom_blur_bgl,
             tonemap_bgl,
+            fxaa_bgl,
             scene_bg,
             shadow_pass_bg,
             lighting_uniforms_bg:  size_deps.lighting_uniforms_bg,
@@ -522,6 +538,7 @@ impl Renderer {
             bloom_blur_h_bg:       size_deps.bloom_blur_h_bg,
             bloom_blur_v_bg:       size_deps.bloom_blur_v_bg,
             tonemap_bg:            size_deps.tonemap_bg,
+            fxaa_bg:               size_deps.fxaa_bg,
             gbuffer_albedo_view:   size_deps.gbuffer_albedo_view,
             gbuffer_normal_view:   size_deps.gbuffer_normal_view,
             gbuffer_depth_view:    size_deps.gbuffer_depth_view,
@@ -530,6 +547,7 @@ impl Renderer {
             ssao_blur_view:        size_deps.ssao_blur_view,
             bloom_ping_view:       size_deps.bloom_ping_view,
             bloom_pong_view:       size_deps.bloom_pong_view,
+            ldr_view:              size_deps.ldr_view,
             shadow_map_view,
             noise_view,
             linear_sampler,
@@ -544,6 +562,7 @@ impl Renderer {
             bloom_threshold_pipeline,
             bloom_blur_pipeline,
             tonemap_pipeline,
+            fxaa_pipeline,
         })
     }
 
@@ -575,7 +594,7 @@ impl Renderer {
             &self.lighting_uniforms_bgl, &self.lighting_inputs_bgl,
             &self.ssao_inputs_bgl, &self.ssao_blur_bgl,
             &self.bloom_threshold_bgl, &self.bloom_blur_bgl,
-            &self.tonemap_bgl,
+            &self.tonemap_bgl, &self.fxaa_bgl,
             &self.bloom_h_buffer, &self.bloom_v_buffer,
         );
         self.lighting_uniforms_bg = sd.lighting_uniforms_bg;
@@ -586,6 +605,7 @@ impl Renderer {
         self.bloom_blur_h_bg      = sd.bloom_blur_h_bg;
         self.bloom_blur_v_bg      = sd.bloom_blur_v_bg;
         self.tonemap_bg           = sd.tonemap_bg;
+        self.fxaa_bg              = sd.fxaa_bg;
         self.gbuffer_albedo_view  = sd.gbuffer_albedo_view;
         self.gbuffer_normal_view  = sd.gbuffer_normal_view;
         self.gbuffer_depth_view   = sd.gbuffer_depth_view;
@@ -594,6 +614,7 @@ impl Renderer {
         self.ssao_blur_view       = sd.ssao_blur_view;
         self.bloom_ping_view      = sd.bloom_ping_view;
         self.bloom_pong_view      = sd.bloom_pong_view;
+        self.ldr_view             = sd.ldr_view;
     }
 
     // ── Scene management ──────────────────────────────────────────────────────
@@ -859,18 +880,33 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 9. Tonemap (HDR + bloom_ping → swapchain) ────────────────────────
+        // ── 9. Tonemap (HDR + bloom_ping → LDR Rgba8Unorm) ───────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Tonemap Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &out_view, resolve_target: None,
+                    view: &self.ldr_view, resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
                 })],
                 ..Default::default()
             });
             pass.set_pipeline(&self.tonemap_pipeline);
             pass.set_bind_group(0, &self.tonemap_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ── 10. FXAA (LDR → swapchain) ───────────────────────────────────────
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("FXAA Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &out_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.fxaa_pipeline);
+            pass.set_bind_group(0, &self.fxaa_bg, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -891,6 +927,7 @@ struct SizeDependentResources {
     ssao_blur_view:       wgpu::TextureView,
     bloom_ping_view:      wgpu::TextureView,
     bloom_pong_view:      wgpu::TextureView,
+    ldr_view:             wgpu::TextureView,
     lighting_uniforms_bg: wgpu::BindGroup,
     lighting_inputs_bg:   wgpu::BindGroup,
     ssao_bg:              wgpu::BindGroup,
@@ -899,6 +936,7 @@ struct SizeDependentResources {
     bloom_blur_h_bg:      wgpu::BindGroup,
     bloom_blur_v_bg:      wgpu::BindGroup,
     tonemap_bg:           wgpu::BindGroup,
+    fxaa_bg:              wgpu::BindGroup,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -922,6 +960,7 @@ impl SizeDependentResources {
         bloom_threshold_bgl:  &wgpu::BindGroupLayout,
         bloom_blur_bgl:       &wgpu::BindGroupLayout,
         tonemap_bgl:          &wgpu::BindGroupLayout,
+        fxaa_bgl:             &wgpu::BindGroupLayout,
         bloom_h_buf:          &wgpu::Buffer,
         bloom_v_buf:          &wgpu::Buffer,
     ) -> Self {
@@ -938,6 +977,8 @@ impl SizeDependentResources {
         let ssao_blur      = tex2d_r8(device, w, h, "SSAO Blur");
         let bloom_ping     = tex2d(device, w2, h2, wgpu::TextureFormat::Rgba16Float, "Bloom Ping");
         let bloom_pong     = tex2d(device, w2, h2, wgpu::TextureFormat::Rgba16Float, "Bloom Pong");
+        // LDR intermediate: tonemap writes here, FXAA reads from here
+        let ldr            = tex2d(device, w, h, wgpu::TextureFormat::Rgba8Unorm, "LDR");
 
         let gbuffer_albedo_view = gbuffer_albedo.create_view(&Default::default());
         let gbuffer_normal_view = gbuffer_normal.create_view(&Default::default());
@@ -952,6 +993,7 @@ impl SizeDependentResources {
         let ssao_blur_view      = ssao_blur.create_view(&Default::default());
         let bloom_ping_view     = bloom_ping.create_view(&Default::default());
         let bloom_pong_view     = bloom_pong.create_view(&Default::default());
+        let ldr_view            = ldr.create_view(&Default::default());
 
         let lighting_uniforms_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:   Some("Lighting Uniforms BG"),
@@ -1035,11 +1077,20 @@ impl SizeDependentResources {
             ],
         });
 
+        let fxaa_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("FXAA BG"),
+            layout:  fxaa_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ldr_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+            ],
+        });
+
         Self {
             gbuffer_albedo_view, gbuffer_normal_view, gbuffer_depth_view,
-            hdr_view, ssao_view, ssao_blur_view, bloom_ping_view, bloom_pong_view,
+            hdr_view, ssao_view, ssao_blur_view, bloom_ping_view, bloom_pong_view, ldr_view,
             lighting_uniforms_bg, lighting_inputs_bg, ssao_bg, ssao_blur_bg,
-            bloom_threshold_bg, bloom_blur_h_bg, bloom_blur_v_bg, tonemap_bg,
+            bloom_threshold_bg, bloom_blur_h_bg, bloom_blur_v_bg, tonemap_bg, fxaa_bg,
         }
     }
 }
