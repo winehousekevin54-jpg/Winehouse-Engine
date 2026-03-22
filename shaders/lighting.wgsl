@@ -1,6 +1,6 @@
 // ============================================================
 // Winehouse Engine — Deferred Lighting Pass (Phase 4)
-// Cook-Torrance PBR + PCF directional shadow + SSAO.
+// Cook-Torrance PBR + Cascaded Shadow Maps (4 cascades) + SSAO.
 // Outputs HDR Rgba16Float.
 // ============================================================
 
@@ -25,6 +25,8 @@ struct LightingUniforms {
     viewport:        vec2<f32>,
     near:            f32,
     far:             f32,
+    cascade_vp:      array<mat4x4<f32>, 4>,
+    cascade_splits:  vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> scene:         SceneUniforms;
@@ -32,7 +34,7 @@ struct LightingUniforms {
 @group(1) @binding(0) var gbuffer_albedo:         texture_2d<f32>;
 @group(1) @binding(1) var gbuffer_normal:         texture_2d<f32>;
 @group(1) @binding(2) var gbuffer_depth:          texture_depth_2d;
-@group(1) @binding(3) var shadow_map:             texture_depth_2d;
+@group(1) @binding(3) var shadow_map:             texture_depth_2d_array;
 @group(1) @binding(4) var shadow_sampler:         sampler_comparison;
 @group(1) @binding(5) var ssao_tex:               texture_2d<f32>;
 @group(1) @binding(6) var linear_sampler:         sampler;
@@ -68,29 +70,88 @@ fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
-// ── PCF Shadow (3×3 kernel) ───────────────────────────────────────────────────
-// NOTE: No early-return inside this function — textureSampleCompare requires
-// uniform control flow. Use select() for bounds check instead.
+// ── PCSS (Percentage-Closer Soft Shadows) with Cascaded Shadow Maps ───────────
+// 1. Blocker search (textureLoad, 16 Poisson samples) → average blocker depth
+// 2. Penumbra estimation from blocker-to-receiver distance ratio
+// 3. Variable-radius PCF (textureSampleCompare, 16 Poisson samples) → soft shadow
+// All textureSampleCompare calls remain in uniform control flow.
 
-fn pcf_shadow(world_pos: vec3<f32>) -> f32 {
-    let light_clip = lighting.light_view_proj * vec4<f32>(world_pos, 1.0);
+const LIGHT_SIZE: f32 = 0.02;   // Apparent light radius in shadow UV space
+const PCSS_SAMPLES: i32 = 16;
+
+// 16-sample Poisson disk (unit-disk distribution)
+const POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2<f32>(-0.9465, -0.1416),
+    vec2<f32>(-0.5753,  0.5960),
+    vec2<f32>(-0.2039, -0.4018),
+    vec2<f32>( 0.1494,  0.8537),
+    vec2<f32>(-0.6863, -0.6395),
+    vec2<f32>( 0.4177,  0.2781),
+    vec2<f32>( 0.0729, -0.8806),
+    vec2<f32>( 0.6862,  0.6523),
+    vec2<f32>(-0.3625,  0.1653),
+    vec2<f32>( 0.8438, -0.0347),
+    vec2<f32>(-0.1247, -0.0057),
+    vec2<f32>( 0.4125, -0.4525),
+    vec2<f32>(-0.7802,  0.2893),
+    vec2<f32>( 0.2601, -0.2078),
+    vec2<f32>(-0.4398, -0.8698),
+    vec2<f32>( 0.6967, -0.6345),
+);
+
+fn linearize_depth(d: f32) -> f32 {
+    return lighting.near * lighting.far / (lighting.far - d * (lighting.far - lighting.near));
+}
+
+fn cascade_shadow(world_pos: vec3<f32>, depth: f32) -> f32 {
+    let view_z = linearize_depth(depth);
+
+    // Select cascade — cascade_splits.xyzw = split distances for cascades 0–3
+    var idx: i32 = 3;
+    if (view_z < lighting.cascade_splits.x) { idx = 0; }
+    else if (view_z < lighting.cascade_splits.y) { idx = 1; }
+    else if (view_z < lighting.cascade_splits.z) { idx = 2; }
+
+    let light_clip = lighting.cascade_vp[idx] * vec4<f32>(world_pos, 1.0);
     let proj       = light_clip.xyz / light_clip.w;
 
     // Map from NDC [-1,1] to UV [0,1]; flip Y
     let uv = vec2<f32>(proj.x * 0.5 + 0.5, 1.0 - (proj.y * 0.5 + 0.5));
 
-    let depth    = proj.z - SHADOW_BIAS;
-    let texel    = 1.0 / SHADOW_SIZE;
-    var shadow   = 0.0;
-    for (var x = -1; x <= 1; x++) {
-        for (var y = -1; y <= 1; y++) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texel;
-            shadow += textureSampleCompare(shadow_map, shadow_sampler, uv + offset, depth);
+    let receiver_depth = proj.z;
+    let texel          = 1.0 / SHADOW_SIZE;
+
+    // ── Step 1: Blocker search (textureLoad — no control-flow restrictions) ──
+    var blocker_sum   = 0.0;
+    var blocker_count = 0;
+    for (var i = 0; i < PCSS_SAMPLES; i++) {
+        let sample_uv = uv + POISSON_DISK[i] * LIGHT_SIZE;
+        let tc = vec2<i32>(sample_uv * SHADOW_SIZE);
+        let blocker_d = textureLoad(shadow_map, tc, idx, 0);
+        if (blocker_d < receiver_depth) {
+            blocker_sum += blocker_d;
+            blocker_count++;
         }
     }
-    // select() instead of early-return: avoids non-uniform control flow
+
+    // ── Step 2: Penumbra estimation ─────────────────────────────────────────
+    // If no blockers, avg_blocker = receiver_depth → penumbra = 0 → min radius
+    let avg_blocker   = select(receiver_depth, blocker_sum / f32(max(blocker_count, 1)), blocker_count > 0);
+    let penumbra      = max(receiver_depth - avg_blocker, 0.0) / max(avg_blocker, 0.0001) * LIGHT_SIZE;
+    let filter_radius = clamp(penumbra, texel, LIGHT_SIZE * 4.0);
+
+    // ── Step 3: Variable-radius PCF (uniform control flow) ──────────────────
+    let d_ref  = receiver_depth - SHADOW_BIAS;
+    var shadow = 0.0;
+    for (var i = 0; i < PCSS_SAMPLES; i++) {
+        let offset = POISSON_DISK[i] * filter_radius;
+        shadow += textureSampleCompare(shadow_map, shadow_sampler, uv + offset, idx, d_ref);
+    }
+
     let in_bounds = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
-    return select(1.0, shadow / 9.0, in_bounds);
+    // No blockers → fully lit; otherwise use PCF result
+    let result = select(1.0, shadow / f32(PCSS_SAMPLES), blocker_count > 0);
+    return select(1.0, result, in_bounds);
 }
 
 // ── Fullscreen triangle vertex ─────────────────────────────────────────────────
@@ -122,7 +183,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     // textureSample and textureSampleCompare MUST be called before any non-uniform
     // branch (WGSL uniform control flow requirement).
     let ssao   = textureSample(ssao_tex, linear_sampler, uv).r;
-    let shadow = pcf_shadow(world_pos);
+    let shadow = cascade_shadow(world_pos, depth);
 
     // Sky / background — return after texture calls to satisfy uniform control flow
     if (depth >= 1.0) {

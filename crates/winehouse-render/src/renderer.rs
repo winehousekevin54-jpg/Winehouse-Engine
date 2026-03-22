@@ -49,6 +49,8 @@ struct LightingUniforms {
     viewport:        [f32; 2],
     near:            f32,
     far:             f32,
+    cascade_vp:      [[[f32; 4]; 4]; 4],
+    cascade_splits:  [f32; 4],
 }
 
 #[repr(C)]
@@ -65,6 +67,13 @@ struct TaaUniforms {
     jitter:       [f32; 2],
     blend_factor: f32,
     _pad:         [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CasUniforms {
+    sharpness: f32,
+    _pad:      [f32; 3],
 }
 
 // ── Scene object ──────────────────────────────────────────────────────────────
@@ -110,7 +119,7 @@ pub struct Renderer {
     pub next_id:        u64,
 
     // Light
-    light_view_proj: Mat4,
+    light_dir: Vec3,
 
     // TAA state
     frame_index:    u32,
@@ -119,7 +128,7 @@ pub struct Renderer {
 
     // Uniform buffers (updated each frame)
     scene_buffer:    wgpu::Buffer,
-    shadow_buffer:   wgpu::Buffer,
+    shadow_buffers:  [wgpu::Buffer; 4],
     lighting_buffer: wgpu::Buffer,
 
     // Bloom uniform buffers (fixed direction)
@@ -128,6 +137,9 @@ pub struct Renderer {
 
     // TAA uniform buffer
     taa_buffer:      wgpu::Buffer,
+
+    // CAS uniform buffer
+    cas_buffer:      wgpu::Buffer,
 
     // Bind group layouts
     object_bgl:           wgpu::BindGroupLayout,
@@ -138,12 +150,12 @@ pub struct Renderer {
     bloom_threshold_bgl:  wgpu::BindGroupLayout,
     bloom_blur_bgl:       wgpu::BindGroupLayout,
     tonemap_bgl:          wgpu::BindGroupLayout,
-    fxaa_bgl:             wgpu::BindGroupLayout,
+    cas_bgl:              wgpu::BindGroupLayout,
     taa_bgl:              wgpu::BindGroupLayout,
 
     // Scene uniform bind group (shared across G-Buffer + shadow)
-    scene_bg:         wgpu::BindGroup,
-    shadow_pass_bg:   wgpu::BindGroup,
+    scene_bg:          wgpu::BindGroup,
+    shadow_pass_bgs:   [wgpu::BindGroup; 4],
 
     // Size-dependent bind groups (recreated on resize)
     lighting_uniforms_bg: wgpu::BindGroup,
@@ -154,7 +166,7 @@ pub struct Renderer {
     bloom_blur_h_bg:      wgpu::BindGroup,
     bloom_blur_v_bg:      wgpu::BindGroup,
     tonemap_bg:           wgpu::BindGroup,
-    fxaa_bg:              wgpu::BindGroup,
+    cas_bg:               wgpu::BindGroup,
     taa_bg:               wgpu::BindGroup,
 
     // Size-dependent textures
@@ -174,8 +186,9 @@ pub struct Renderer {
     taa_output_tex:         wgpu::Texture,
 
     // Fixed textures
-    shadow_map_view:    wgpu::TextureView,
-    noise_view:         wgpu::TextureView,
+    shadow_array_view:     wgpu::TextureView,
+    shadow_cascade_views:  [wgpu::TextureView; 4],
+    noise_view:            wgpu::TextureView,
 
     // Samplers
     linear_sampler:   wgpu::Sampler,
@@ -192,7 +205,7 @@ pub struct Renderer {
     bloom_threshold_pipeline:  wgpu::RenderPipeline,
     bloom_blur_pipeline:       wgpu::RenderPipeline,
     tonemap_pipeline:          wgpu::RenderPipeline,
-    fxaa_pipeline:             wgpu::RenderPipeline,
+    cas_pipeline:              wgpu::RenderPipeline,
     taa_pipeline:              wgpu::RenderPipeline,
 }
 
@@ -244,11 +257,7 @@ impl Renderer {
         surface.configure(&device, &surface_config);
 
         // ── Light setup ────────────────────────────────────────────────────────
-        let light_dir    = Vec3::new(-0.5_f32, -1.0, -0.3).normalize();
-        let light_pos    = -light_dir * 25.0;
-        let light_view   = Mat4::look_at_rh(light_pos, Vec3::ZERO, Vec3::Y);
-        let light_proj   = Mat4::orthographic_rh(-15.0, 15.0, -15.0, 15.0, 0.1, 60.0);
-        let light_view_proj = light_proj * light_view;
+        let light_dir = Vec3::new(-0.5_f32, -1.0, -0.3).normalize();
 
         // ── Shaders ────────────────────────────────────────────────────────────
         let sh_gbuffer  = shader(&device, include_str!("../../../shaders/gbuffer.wgsl"),  "G-Buffer");
@@ -259,7 +268,7 @@ impl Renderer {
         let sh_bloom_th = shader(&device, include_str!("../../../shaders/bloom_threshold.wgsl"), "Bloom Threshold");
         let sh_bloom_bl = shader(&device, include_str!("../../../shaders/bloom_blur.wgsl"),      "Bloom Blur");
         let sh_tonemap  = shader(&device, include_str!("../../../shaders/tonemap.wgsl"),  "Tonemap");
-        let sh_fxaa     = shader(&device, include_str!("../../../shaders/fxaa.wgsl"),     "FXAA");
+        let sh_cas      = shader(&device, include_str!("../../../shaders/cas.wgsl"),      "CAS");
         let sh_taa      = shader(&device, include_str!("../../../shaders/taa.wgsl"),      "TAA");
 
         // ── Samplers ───────────────────────────────────────────────────────────
@@ -293,9 +302,12 @@ impl Renderer {
 
         // ── Uniform buffers ────────────────────────────────────────────────────
         let scene_buffer    = uniform_buf(&device, std::mem::size_of::<SceneUniforms>(),    "Scene");
-        let shadow_buffer   = uniform_buf(&device, std::mem::size_of::<ShadowUniforms>(),   "Shadow");
+        let shadow_buffers: [wgpu::Buffer; 4] = std::array::from_fn(|i| {
+            uniform_buf(&device, std::mem::size_of::<ShadowUniforms>(), &format!("Shadow Cascade {i}"))
+        });
         let lighting_buffer = uniform_buf(&device, std::mem::size_of::<LightingUniforms>(), "Lighting");
         let taa_buffer      = uniform_buf(&device, std::mem::size_of::<TaaUniforms>(),      "TAA");
+        let cas_buffer      = uniform_buf(&device, std::mem::size_of::<CasUniforms>(),      "CAS");
 
         let w2 = width.max(2) / 2;
         let h2 = height.max(2) / 2;
@@ -317,7 +329,7 @@ impl Renderer {
         });
 
         // ── Fixed textures ─────────────────────────────────────────────────────
-        let (_shadow_map_tex, shadow_map_view) = create_shadow_map(&device);
+        let (_shadow_map_tex, shadow_array_view, shadow_cascade_views) = create_shadow_map(&device);
         let (_noise_tex, noise_view) = create_noise_texture(&device, &queue);
 
         // ── Bind group layouts ─────────────────────────────────────────────────
@@ -346,7 +358,7 @@ impl Renderer {
                 bgl_texture_2d(0),
                 bgl_texture_2d(1),
                 bgl_depth_texture(2),
-                bgl_depth_texture(3),
+                bgl_depth_texture_array(3),
                 bgl_comparison_sampler(4),
                 bgl_texture_2d(5),
                 bgl_sampler(6),
@@ -377,9 +389,9 @@ impl Renderer {
             label:   Some("Tonemap BGL"),
             entries: &[bgl_texture_2d(0), bgl_texture_2d(1), bgl_sampler(2)],
         });
-        let fxaa_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label:   Some("FXAA BGL"),
-            entries: &[bgl_texture_2d(0), bgl_sampler(1)],
+        let cas_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("CAS BGL"),
+            entries: &[bgl_texture_2d(0), bgl_sampler(1), bgl_uniform(2, wgpu::ShaderStages::FRAGMENT)],
         });
         let taa_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("TAA BGL"),
@@ -399,10 +411,12 @@ impl Renderer {
             layout:  &scene_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: scene_buffer.as_entire_binding() }],
         });
-        let shadow_pass_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label:   Some("Shadow Pass BG"),
-            layout:  &shadow_pass_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() }],
+        let shadow_pass_bgs: [wgpu::BindGroup; 4] = std::array::from_fn(|i| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:   Some("Shadow Pass BG"),
+                layout:  &shadow_pass_bgl,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_buffers[i].as_entire_binding() }],
+            })
         });
 
         // ── Pipelines ──────────────────────────────────────────────────────────
@@ -514,15 +528,15 @@ impl Renderer {
             &[&bloom_blur_bgl],
             &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
-        // Tonemap → LDR intermediate (Rgba8Unorm); FXAA reads this and writes to swapchain
+        // Tonemap → LDR intermediate (Rgba8Unorm); CAS reads this and writes to swapchain
         let tonemap_pipeline = fullscreen_pipeline(
             &device, &sh_tonemap, "Tonemap",
             &[&tonemap_bgl],
             &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
-        let fxaa_pipeline = fullscreen_pipeline(
-            &device, &sh_fxaa, "FXAA",
-            &[&fxaa_bgl],
+        let cas_pipeline = fullscreen_pipeline(
+            &device, &sh_cas, "CAS",
+            &[&cas_bgl],
             &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
         let taa_pipeline = fullscreen_pipeline(
@@ -540,12 +554,12 @@ impl Renderer {
         let size_deps = SizeDependentResources::new(
             &device, w, h, &linear_sampler, &repeat_sampler,
             &shadow_sampler, &point_sampler,
-            &shadow_map_view, &noise_view,
-            &scene_buffer, &lighting_buffer, &taa_buffer,
+            &shadow_array_view, &noise_view,
+            &scene_buffer, &lighting_buffer, &taa_buffer, &cas_buffer,
             &lighting_uniforms_bgl, &lighting_inputs_bgl,
             &ssao_inputs_bgl, &ssao_blur_bgl,
             &bloom_threshold_bgl, &bloom_blur_bgl,
-            &tonemap_bgl, &fxaa_bgl, &taa_bgl,
+            &tonemap_bgl, &cas_bgl, &taa_bgl,
             &bloom_h_buf, &bloom_v_buf,
         );
 
@@ -557,16 +571,17 @@ impl Renderer {
             camera,
             objects: Vec::new(),
             next_id: 1,
-            light_view_proj,
+            light_dir,
             frame_index: 0,
             prev_view_proj: Mat4::IDENTITY,
             taa_valid: false,
             scene_buffer,
-            shadow_buffer,
+            shadow_buffers,
             lighting_buffer,
             bloom_h_buffer: bloom_h_buf,
             bloom_v_buffer: bloom_v_buf,
             taa_buffer,
+            cas_buffer,
             object_bgl,
             lighting_uniforms_bgl,
             lighting_inputs_bgl,
@@ -575,10 +590,10 @@ impl Renderer {
             bloom_threshold_bgl,
             bloom_blur_bgl,
             tonemap_bgl,
-            fxaa_bgl,
+            cas_bgl,
             taa_bgl,
             scene_bg,
-            shadow_pass_bg,
+            shadow_pass_bgs,
             lighting_uniforms_bg:  size_deps.lighting_uniforms_bg,
             lighting_inputs_bg:    size_deps.lighting_inputs_bg,
             ssao_bg:               size_deps.ssao_bg,
@@ -587,7 +602,7 @@ impl Renderer {
             bloom_blur_h_bg:       size_deps.bloom_blur_h_bg,
             bloom_blur_v_bg:       size_deps.bloom_blur_v_bg,
             tonemap_bg:            size_deps.tonemap_bg,
-            fxaa_bg:               size_deps.fxaa_bg,
+            cas_bg:                size_deps.cas_bg,
             taa_bg:                size_deps.taa_bg,
             gbuffer_albedo_view:   size_deps.gbuffer_albedo_view,
             gbuffer_normal_view:   size_deps.gbuffer_normal_view,
@@ -603,7 +618,8 @@ impl Renderer {
             taa_output_view:       size_deps.taa_output_view,
             taa_history_tex:       size_deps.taa_history_tex,
             taa_output_tex:        size_deps.taa_output_tex,
-            shadow_map_view,
+            shadow_array_view,
+            shadow_cascade_views,
             noise_view,
             linear_sampler,
             repeat_sampler,
@@ -617,7 +633,7 @@ impl Renderer {
             bloom_threshold_pipeline,
             bloom_blur_pipeline,
             tonemap_pipeline,
-            fxaa_pipeline,
+            cas_pipeline,
             taa_pipeline,
         })
     }
@@ -645,12 +661,12 @@ impl Renderer {
             &self.device, width, height,
             &self.linear_sampler, &self.repeat_sampler,
             &self.shadow_sampler, &self.point_sampler,
-            &self.shadow_map_view, &self.noise_view,
-            &self.scene_buffer, &self.lighting_buffer, &self.taa_buffer,
+            &self.shadow_array_view, &self.noise_view,
+            &self.scene_buffer, &self.lighting_buffer, &self.taa_buffer, &self.cas_buffer,
             &self.lighting_uniforms_bgl, &self.lighting_inputs_bgl,
             &self.ssao_inputs_bgl, &self.ssao_blur_bgl,
             &self.bloom_threshold_bgl, &self.bloom_blur_bgl,
-            &self.tonemap_bgl, &self.fxaa_bgl, &self.taa_bgl,
+            &self.tonemap_bgl, &self.cas_bgl, &self.taa_bgl,
             &self.bloom_h_buffer, &self.bloom_v_buffer,
         );
         self.lighting_uniforms_bg = sd.lighting_uniforms_bg;
@@ -661,7 +677,7 @@ impl Renderer {
         self.bloom_blur_h_bg      = sd.bloom_blur_h_bg;
         self.bloom_blur_v_bg      = sd.bloom_blur_v_bg;
         self.tonemap_bg           = sd.tonemap_bg;
-        self.fxaa_bg              = sd.fxaa_bg;
+        self.cas_bg               = sd.cas_bg;
         self.taa_bg               = sd.taa_bg;
         self.gbuffer_albedo_view  = sd.gbuffer_albedo_view;
         self.gbuffer_normal_view  = sd.gbuffer_normal_view;
@@ -782,9 +798,6 @@ impl Renderer {
         let inv_vp       = unjittered_vp.inverse();
         let cam_pos      = self.camera.position();
 
-        // Normalized light direction
-        let light_dir_n = Vec3::new(-0.5_f32, -1.0, -0.3).normalize();
-
         // Update scene uniforms (jittered VP for G-Buffer, unjittered for lighting/post)
         self.queue.write_buffer(&self.scene_buffer, 0, bytemuck::bytes_of(&SceneUniforms {
             view_proj:            jittered_vp.to_cols_array_2d(),
@@ -792,7 +805,7 @@ impl Renderer {
             prev_view_proj:       self.prev_view_proj.to_cols_array_2d(),
             camera_pos:           cam_pos.to_array(),
             _pad0:                0.0,
-            light_dir:            light_dir_n.to_array(),
+            light_dir:            self.light_dir.to_array(),
             _pad1:                0.0,
             light_color:          [1.2, 1.1, 1.0],
             _pad2:                0.0,
@@ -800,19 +813,37 @@ impl Renderer {
             _pad3:                0.0,
         }));
 
-        // Update shadow uniforms
-        self.queue.write_buffer(&self.shadow_buffer, 0, bytemuck::bytes_of(&ShadowUniforms {
-            light_view_proj: self.light_view_proj.to_cols_array_2d(),
-        }));
+        // Compute cascade shadow maps
+        let cascade_splits = compute_cascade_splits(self.camera.near, self.camera.far);
+        let mut cascade_vps = [Mat4::IDENTITY; 4];
+        let mut prev_split = self.camera.near;
+        for i in 0..4 {
+            cascade_vps[i] = cascade_view_proj(&self.camera, self.light_dir, prev_split, cascade_splits[i]);
+            prev_split = cascade_splits[i];
+        }
+
+        // Update shadow uniforms (one buffer per cascade)
+        for i in 0..4 {
+            self.queue.write_buffer(&self.shadow_buffers[i], 0, bytemuck::bytes_of(&ShadowUniforms {
+                light_view_proj: cascade_vps[i].to_cols_array_2d(),
+            }));
+        }
 
         // Update lighting uniforms (use unjittered VP)
         self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&LightingUniforms {
             inv_view_proj:   inv_vp.to_cols_array_2d(),
-            light_view_proj: self.light_view_proj.to_cols_array_2d(),
+            light_view_proj: cascade_vps[0].to_cols_array_2d(),
             view_proj:       unjittered_vp.to_cols_array_2d(),
             viewport:        [w, h],
             near:            self.camera.near,
             far:             self.camera.far,
+            cascade_vp: [
+                cascade_vps[0].to_cols_array_2d(),
+                cascade_vps[1].to_cols_array_2d(),
+                cascade_vps[2].to_cols_array_2d(),
+                cascade_vps[3].to_cols_array_2d(),
+            ],
+            cascade_splits,
         }));
 
         // Update TAA uniforms
@@ -822,6 +853,12 @@ impl Renderer {
             jitter:       [jx, jy],
             blend_factor: blend,
             _pad:         [0.0; 3],
+        }));
+
+        // Update CAS uniforms
+        self.queue.write_buffer(&self.cas_buffer, 0, bytemuck::bytes_of(&CasUniforms {
+            sharpness: 0.5,
+            _pad:      [0.0; 3],
         }));
 
         // Update per-object uniforms with current prev_model, then advance prev_model
@@ -839,20 +876,20 @@ impl Renderer {
         let out_view = output.texture.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&Default::default());
 
-        // ── 1. Shadow pass ─────────────────────────────────────────────────────
-        {
+        // ── 1. Shadow passes (4 cascades) ─────────────────────────────────────
+        for cascade in 0..4usize {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Shadow Pass"),
+                label: Some("Shadow Cascade"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_map_view,
+                    view: &self.shadow_cascade_views[cascade],
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
             });
             pass.set_pipeline(&self.shadow_pipeline);
-            pass.set_bind_group(0, &self.shadow_pass_bg, &[]);
+            pass.set_bind_group(0, &self.shadow_pass_bgs[cascade], &[]);
             for obj in &self.objects {
                 pass.set_bind_group(1, &obj.object_bind_group, &[]);
                 pass.set_vertex_buffer(0, obj.mesh.vertex_buffer.slice(..));
@@ -1039,18 +1076,18 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 11. FXAA (LDR → swapchain) ───────────────────────────────────────
+        // ── 11. CAS Sharpening (LDR → swapchain) ────────────────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("FXAA Pass"),
+                label: Some("CAS Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &out_view, resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&self.fxaa_pipeline);
-            pass.set_bind_group(0, &self.fxaa_bg, &[]);
+            pass.set_pipeline(&self.cas_pipeline);
+            pass.set_bind_group(0, &self.cas_bg, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -1091,7 +1128,7 @@ struct SizeDependentResources {
     bloom_blur_h_bg:      wgpu::BindGroup,
     bloom_blur_v_bg:      wgpu::BindGroup,
     tonemap_bg:           wgpu::BindGroup,
-    fxaa_bg:              wgpu::BindGroup,
+    cas_bg:               wgpu::BindGroup,
     taa_bg:               wgpu::BindGroup,
 }
 
@@ -1105,11 +1142,12 @@ impl SizeDependentResources {
         repeat_sampler:       &wgpu::Sampler,
         shadow_sampler:       &wgpu::Sampler,
         point_sampler:        &wgpu::Sampler,
-        shadow_map_view:      &wgpu::TextureView,
+        shadow_array_view:    &wgpu::TextureView,
         noise_view:           &wgpu::TextureView,
         scene_buffer:         &wgpu::Buffer,
         lighting_buffer:      &wgpu::Buffer,
         taa_buffer:           &wgpu::Buffer,
+        cas_buffer:           &wgpu::Buffer,
         lighting_uniforms_bgl:&wgpu::BindGroupLayout,
         lighting_inputs_bgl:  &wgpu::BindGroupLayout,
         ssao_inputs_bgl:      &wgpu::BindGroupLayout,
@@ -1117,7 +1155,7 @@ impl SizeDependentResources {
         bloom_threshold_bgl:  &wgpu::BindGroupLayout,
         bloom_blur_bgl:       &wgpu::BindGroupLayout,
         tonemap_bgl:          &wgpu::BindGroupLayout,
-        fxaa_bgl:             &wgpu::BindGroupLayout,
+        cas_bgl:              &wgpu::BindGroupLayout,
         taa_bgl:              &wgpu::BindGroupLayout,
         bloom_h_buf:          &wgpu::Buffer,
         bloom_v_buf:          &wgpu::Buffer,
@@ -1136,7 +1174,7 @@ impl SizeDependentResources {
         let ssao_blur      = tex2d_r8(device, w, h, "SSAO Blur");
         let bloom_ping     = tex2d(device, w2, h2, wgpu::TextureFormat::Rgba16Float, "Bloom Ping");
         let bloom_pong     = tex2d(device, w2, h2, wgpu::TextureFormat::Rgba16Float, "Bloom Pong");
-        // LDR intermediate: tonemap writes here, FXAA reads from here
+        // LDR intermediate: tonemap writes here, CAS reads from here
         let ldr            = tex2d(device, w, h, wgpu::TextureFormat::Rgba8Unorm, "LDR");
 
         // TAA history & output need COPY_SRC/COPY_DST for end-of-frame blit
@@ -1197,7 +1235,7 @@ impl SizeDependentResources {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&gbuffer_albedo_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&gbuffer_normal_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(shadow_map_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(shadow_array_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(shadow_sampler) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&ssao_blur_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(linear_sampler) },
@@ -1263,12 +1301,13 @@ impl SizeDependentResources {
             ],
         });
 
-        let fxaa_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label:   Some("FXAA BG"),
-            layout:  fxaa_bgl,
+        let cas_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("CAS BG"),
+            layout:  cas_bgl,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ldr_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: cas_buffer.as_entire_binding() },
             ],
         });
 
@@ -1290,7 +1329,7 @@ impl SizeDependentResources {
             hdr_view, ssao_view, ssao_blur_view, bloom_ping_view, bloom_pong_view, ldr_view,
             taa_history_view, taa_output_view, taa_history_tex, taa_output_tex,
             lighting_uniforms_bg, lighting_inputs_bg, ssao_bg, ssao_blur_bg,
-            bloom_threshold_bg, bloom_blur_h_bg, bloom_blur_v_bg, tonemap_bg, fxaa_bg, taa_bg,
+            bloom_threshold_bg, bloom_blur_h_bg, bloom_blur_v_bg, tonemap_bg, cas_bg, taa_bg,
         }
     }
 }
@@ -1345,10 +1384,10 @@ fn depth_tex(device: &wgpu::Device, w: u32, h: u32, label: &str) -> wgpu::Textur
     })
 }
 
-fn create_shadow_map(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
+fn create_shadow_map(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView, [wgpu::TextureView; 4]) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label:                Some("Shadow Map"),
-        size:                 wgpu::Extent3d { width: 2048, height: 2048, depth_or_array_layers: 1 },
+        size:                 wgpu::Extent3d { width: 2048, height: 2048, depth_or_array_layers: 4 },
         mip_level_count:      1,
         sample_count:         1,
         dimension:            wgpu::TextureDimension::D2,
@@ -1356,12 +1395,25 @@ fn create_shadow_map(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView
         usage:                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats:         &[],
     });
-    // DepthOnly required by Chrome WebGPU for both render attachments and shader bindings.
-    let view = tex.create_view(&wgpu::TextureViewDescriptor {
-        aspect: wgpu::TextureAspect::DepthOnly,
+    // Full array view for sampling in the lighting shader
+    let array_view = tex.create_view(&wgpu::TextureViewDescriptor {
+        dimension:         Some(wgpu::TextureViewDimension::D2Array),
+        aspect:            wgpu::TextureAspect::DepthOnly,
+        base_array_layer:  0,
+        array_layer_count: Some(4),
         ..Default::default()
     });
-    (tex, view)
+    // Per-layer views for rendering each cascade
+    let cascade_views = std::array::from_fn(|i| {
+        tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension:         Some(wgpu::TextureViewDimension::D2),
+            aspect:            wgpu::TextureAspect::DepthOnly,
+            base_array_layer:  i as u32,
+            array_layer_count: Some(1),
+            ..Default::default()
+        })
+    });
+    (tex, array_view, cascade_views)
 }
 
 fn create_noise_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::TextureView) {
@@ -1469,6 +1521,19 @@ fn bgl_depth_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn bgl_depth_texture_array(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type:    wgpu::TextureSampleType::Depth,
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled:   false,
+        },
+        count: None,
+    }
+}
+
 fn bgl_sampler(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -1500,6 +1565,66 @@ fn make_object_uniforms(info: &SceneObjectInfo, prev_model: Mat4) -> ObjectUnifo
         roughness:  info.roughness,
         _pad:       [0.0; 2],
     }
+}
+
+// ── Cascade Shadow Map helpers ────────────────────────────────────────────────
+
+const NUM_CASCADES: usize = 4;
+const SHADOW_DISTANCE: f32 = 50.0;
+const CASCADE_LAMBDA: f32 = 0.75;
+
+fn compute_cascade_splits(near: f32, far: f32) -> [f32; 4] {
+    let shadow_far = far.min(SHADOW_DISTANCE);
+    let cn = near.max(0.1);
+    let mut splits = [0.0_f32; NUM_CASCADES];
+    for i in 0..NUM_CASCADES {
+        let p = (i + 1) as f32 / NUM_CASCADES as f32;
+        let log_split = cn * (shadow_far / cn).powf(p);
+        let uniform_split = cn + (shadow_far - cn) * p;
+        splits[i] = CASCADE_LAMBDA * log_split + (1.0 - CASCADE_LAMBDA) * uniform_split;
+    }
+    splits
+}
+
+fn cascade_view_proj(camera: &Camera, light_dir: Vec3, near: f32, far: f32) -> Mat4 {
+    use glam::Vec4;
+
+    let cam_vp  = Mat4::perspective_rh(camera.fov_y, camera.aspect, near, far) * camera.view_matrix();
+    let inv_vp  = cam_vp.inverse();
+
+    // 8 NDC corners (WebGPU: Z ∈ [0,1])
+    let mut world = [Vec3::ZERO; 8];
+    let mut idx = 0;
+    for &z in &[0.0_f32, 1.0] {
+        for &y in &[-1.0_f32, 1.0] {
+            for &x in &[-1.0_f32, 1.0] {
+                let w = inv_vp * Vec4::new(x, y, z, 1.0);
+                world[idx] = w.truncate() / w.w;
+                idx += 1;
+            }
+        }
+    }
+
+    let center = world.iter().copied().fold(Vec3::ZERO, |a, b| a + b) / 8.0;
+
+    let up = if light_dir.cross(Vec3::Y).length_squared() < 0.001 { Vec3::Z } else { Vec3::Y };
+    let light_view = Mat4::look_at_rh(center - light_dir * 100.0, center, up);
+
+    // AABB in light-view space
+    let mut ls_min = Vec3::splat(f32::MAX);
+    let mut ls_max = Vec3::splat(f32::MIN);
+    for c in &world {
+        let ls = light_view.transform_point3(*c);
+        ls_min = ls_min.min(ls);
+        ls_max = ls_max.max(ls);
+    }
+
+    // orthographic_rh maps view-space Z in [-near, -far] to NDC [0,1].
+    // Extend toward the light to capture shadow casters outside the camera frustum.
+    let near_z = 0.1_f32;
+    let far_z  = (-ls_min.z).max(1.0) + 50.0;
+
+    Mat4::orthographic_rh(ls_min.x, ls_max.x, ls_min.y, ls_max.y, near_z, far_z) * light_view
 }
 
 const _: fn() = || { let _ = std::mem::size_of::<Vertex>(); };

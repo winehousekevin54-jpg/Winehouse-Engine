@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "editor",
+      "runtimeExecutable": "/Users/casian-kevinpetrovici/.nvm/versions/node/v24.14.0/bin/node",
+      "runtimeArgs": ["/Users/casian-kevinpetrovici/Documents/Winehouse-Engine/node_modules/.pnpm/vite@6.4.1/node_modules/vite/bin/vite.js"],
+      "cwd": "packages/editor",
+      "port": 5173
+    }
+  ]
+}
