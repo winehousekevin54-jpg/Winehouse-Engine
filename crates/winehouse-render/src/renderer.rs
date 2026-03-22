@@ -289,8 +289,9 @@ pub struct Renderer {
     material_sampler: wgpu::Sampler,
 
     // Pipelines
-    gbuffer_pipeline:          wgpu::RenderPipeline,
-    shadow_pipeline:           wgpu::RenderPipeline,
+    gbuffer_pipeline:             wgpu::RenderPipeline,  // cull_mode: Back  (solid opaque)
+    gbuffer_doublesided_pipeline: wgpu::RenderPipeline,  // cull_mode: None  (alpha-masked wings/foliage)
+    shadow_pipeline:              wgpu::RenderPipeline,
     lighting_pipeline:         wgpu::RenderPipeline,
     ssao_pipeline:             wgpu::RenderPipeline,
     ssao_blur_pipeline:        wgpu::RenderPipeline,
@@ -664,6 +665,55 @@ impl Renderer {
             })
         };
 
+        // Double-sided G-Buffer pipeline for alpha-masked materials (wings, foliage,
+        // feathers, hair). Identical to gbuffer_pipeline except cull_mode = None so
+        // the mesh is visible from both sides and edge-on angles.
+        let gbuffer_doublesided_pipeline = {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label:                Some("G-Buffer DS Layout"),
+                bind_group_layouts:   &[&scene_bgl, &object_bgl],
+                push_constant_ranges: &[],
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label:  Some("G-Buffer DS Pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module:              &sh_gbuffer,
+                    entry_point:         Some("vs_main"),
+                    buffers:             &[vertex_buffer_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module:      &sh_gbuffer,
+                    entry_point: Some("fs_main"),
+                    targets:     &[
+                        Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm,  blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                        Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                        Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                    ],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology:   wgpu::PrimitiveTopology::TriangleList,
+                    // None = double-sided; required for alpha-masked wing/foliage planes
+                    // that need to be visible from both the front and the back.
+                    cull_mode:  None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format:              wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare:       wgpu::CompareFunction::Less,
+                    stencil:             Default::default(),
+                    bias:                Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview:   None,
+                cache:       None,
+            })
+        };
+
         let shadow_pipeline = {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label:                Some("Shadow Layout"),
@@ -890,6 +940,7 @@ impl Renderer {
             point_sampler,
             material_sampler,
             gbuffer_pipeline,
+            gbuffer_doublesided_pipeline,
             shadow_pipeline,
             lighting_pipeline,
             ssao_pipeline,
@@ -1309,9 +1360,22 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            pass.set_pipeline(&self.gbuffer_pipeline);
             pass.set_bind_group(0, &self.scene_bg, &[]);
+            // Render opaque objects first (cull_mode: Back), then alpha-masked
+            // objects with the double-sided pipeline (cull_mode: None) so that
+            // wings/feathers/foliage are visible from both sides.
+            let mut last_doublesided = false;
+            pass.set_pipeline(&self.gbuffer_pipeline);
             for obj in &self.objects {
+                let need_ds = obj.info.alpha_cutoff > 0.0;
+                if need_ds != last_doublesided {
+                    if need_ds {
+                        pass.set_pipeline(&self.gbuffer_doublesided_pipeline);
+                    } else {
+                        pass.set_pipeline(&self.gbuffer_pipeline);
+                    }
+                    last_doublesided = need_ds;
+                }
                 pass.set_bind_group(1, &obj.object_bind_group, &[]);
                 pass.set_vertex_buffer(0, obj.mesh.vertex_buffer.slice(..));
                 pass.set_index_buffer(obj.mesh.index_buffer.slice(..), obj.mesh.index_format);
