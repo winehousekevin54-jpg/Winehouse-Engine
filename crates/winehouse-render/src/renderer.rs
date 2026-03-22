@@ -1198,7 +1198,7 @@ impl Renderer {
             _pad1:                0.0,
             light_color:          [1.2, 1.1, 1.0],
             _pad2:                0.0,
-            ambient_color:        [0.12, 0.12, 0.16],
+            ambient_color:        [0.15, 0.15, 0.18],
             _pad3:                0.0,
         }));
 
@@ -1236,7 +1236,10 @@ impl Renderer {
         }));
 
         // Update TAA uniforms
-        let blend = if self.taa_valid { 0.1_f32 } else { 1.0 };
+        // 0.15 = 85% history / 15% current frame.
+        // Lower values (0.05) = sharper but more aliased; higher (0.2) = smoother but blurrier.
+        // CAS sharpening downstream compensates for the residual TAA softness.
+        let blend = if self.taa_valid { 0.15_f32 } else { 1.0 };
         self.queue.write_buffer(&self.taa_buffer, 0, bytemuck::bytes_of(&TaaUniforms {
             viewport:     [w, h],
             jitter:       [jx, jy],
@@ -1246,7 +1249,7 @@ impl Renderer {
 
         // Update CAS uniforms
         self.queue.write_buffer(&self.cas_buffer, 0, bytemuck::bytes_of(&CasUniforms {
-            sharpness: 0.85, // Higher value = stronger sharpening to counteract TAA blur
+            sharpness: 0.90, // Higher value = stronger sharpening to counteract TAA blur
             _pad:      [0.0; 3],
         }));
 
