@@ -100,6 +100,35 @@ struct VolumetricUniforms {
     _pad:         [f32; 2],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct MotionBlurUniforms {
+    viewport:     [f32; 2],
+    max_blur_px:  f32,
+    sample_count: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DofUniforms {
+    viewport:       [f32; 2],
+    focal_distance: f32,
+    focal_range:    f32,
+    bokeh_radius:   f32,
+    near:           f32,
+    far:            f32,
+    _pad:           f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ColorGradeUniforms {
+    exposure:     f32,
+    saturation:   f32,
+    contrast:     f32,
+    lut_strength: f32,
+}
+
 // ── Scene object ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -171,6 +200,11 @@ pub struct Renderer {
     // Volumetric uniform buffer
     vol_buffer:      wgpu::Buffer,
 
+    // Motion blur / DOF / colour grade uniform buffers
+    motion_blur_buffer:  wgpu::Buffer,
+    dof_buffer:          wgpu::Buffer,
+    color_grade_buffer:  wgpu::Buffer,
+
     // Bind group layouts
     object_bgl:           wgpu::BindGroupLayout,
     lighting_uniforms_bgl: wgpu::BindGroupLayout,
@@ -186,6 +220,8 @@ pub struct Renderer {
     ssr_composite_bgl:    wgpu::BindGroupLayout,
     vol_bgl:              wgpu::BindGroupLayout,
     vol_composite_bgl:    wgpu::BindGroupLayout,
+    motion_blur_bgl:      wgpu::BindGroupLayout,
+    dof_bgl:              wgpu::BindGroupLayout,
 
     // Scene uniform bind group (shared across G-Buffer + shadow)
     scene_bg:          wgpu::BindGroup,
@@ -206,6 +242,8 @@ pub struct Renderer {
     ssr_composite_bg:     wgpu::BindGroup,
     vol_bg:               wgpu::BindGroup,
     vol_composite_bg:     wgpu::BindGroup,
+    motion_blur_bg:       wgpu::BindGroup,
+    dof_bg:               wgpu::BindGroup,
 
     // Size-dependent textures
     gbuffer_albedo_view:    wgpu::TextureView,
@@ -225,11 +263,14 @@ pub struct Renderer {
     ssr_view:               wgpu::TextureView,
     ssr_hdr_view:           wgpu::TextureView,
     vol_view:               wgpu::TextureView,
+    motion_blur_view:       wgpu::TextureView,
+    dof_view:               wgpu::TextureView,
 
     // Fixed textures
     shadow_array_view:     wgpu::TextureView,
     shadow_cascade_views:  [wgpu::TextureView; 4],
     noise_view:            wgpu::TextureView,
+    lut_view:              wgpu::TextureView,
 
     // Default PBR textures (1×1 fallbacks)
     default_albedo_view:   wgpu::TextureView,
@@ -258,6 +299,8 @@ pub struct Renderer {
     ssr_composite_pipeline:    wgpu::RenderPipeline,
     vol_pipeline:              wgpu::RenderPipeline,
     vol_composite_pipeline:    wgpu::RenderPipeline,
+    motion_blur_pipeline:      wgpu::RenderPipeline,
+    dof_pipeline:              wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -325,6 +368,8 @@ impl Renderer {
         let sh_ssr_comp = shader(&device, include_str!("../../../shaders/ssr_composite.wgsl"), "SSR Composite");
         let sh_vol      = shader(&device, include_str!("../../../shaders/volumetric.wgsl"), "Volumetric");
         let sh_vol_comp = shader(&device, include_str!("../../../shaders/volumetric_composite.wgsl"), "Volumetric Composite");
+        let sh_motion_blur = shader(&device, include_str!("../../../shaders/motion_blur.wgsl"), "Motion Blur");
+        let sh_dof         = shader(&device, include_str!("../../../shaders/dof.wgsl"),         "DOF");
 
         // ── Samplers ───────────────────────────────────────────────────────────
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -365,6 +410,9 @@ impl Renderer {
         let cas_buffer      = uniform_buf(&device, std::mem::size_of::<CasUniforms>(),      "CAS");
         let ssr_buffer      = uniform_buf(&device, std::mem::size_of::<SsrUniforms>(),      "SSR");
         let vol_buffer      = uniform_buf(&device, std::mem::size_of::<VolumetricUniforms>(), "Volumetric");
+        let motion_blur_buffer = uniform_buf(&device, std::mem::size_of::<MotionBlurUniforms>(), "Motion Blur");
+        let dof_buffer         = uniform_buf(&device, std::mem::size_of::<DofUniforms>(),         "DOF");
+        let color_grade_buffer = uniform_buf(&device, std::mem::size_of::<ColorGradeUniforms>(),  "Color Grade");
 
         let w2 = width.max(2) / 2;
         let h2 = height.max(2) / 2;
@@ -393,6 +441,7 @@ impl Renderer {
         let default_albedo_view = create_1x1_texture(&device, &queue, &[255, 255, 255, 255], wgpu::TextureFormat::Rgba8UnormSrgb, "Default Albedo");
         let default_normal_view = create_1x1_texture(&device, &queue, &[128, 128, 255, 255], wgpu::TextureFormat::Rgba8Unorm, "Default Normal");
         let default_mr_view     = create_1x1_texture(&device, &queue, &[0, 128, 0, 255],     wgpu::TextureFormat::Rgba8Unorm, "Default MR");
+        let lut_view            = create_identity_lut(&device, &queue);
         let material_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label:           Some("Material"),
             address_mode_u:  wgpu::AddressMode::Repeat,
@@ -464,7 +513,13 @@ impl Renderer {
         });
         let tonemap_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("Tonemap BGL"),
-            entries: &[bgl_texture_2d(0), bgl_texture_2d(1), bgl_sampler(2)],
+            entries: &[
+                bgl_texture_2d(0),
+                bgl_texture_2d(1),
+                bgl_sampler(2),
+                bgl_uniform(3, wgpu::ShaderStages::FRAGMENT),  // ColorGradeUniforms
+                bgl_texture_3d(4),                             // 3D LUT
+            ],
         });
         let cas_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("CAS BGL"),
@@ -523,6 +578,26 @@ impl Renderer {
                 bgl_texture_2d(1),      // Volumetric result (half-res)
                 bgl_depth_texture(2),   // Full-res G-Buffer depth (bilateral weights)
                 bgl_sampler(3),         // Linear sampler
+            ],
+        });
+
+        let motion_blur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("Motion Blur BGL"),
+            entries: &[
+                bgl_uniform(0, wgpu::ShaderStages::FRAGMENT),  // MotionBlurUniforms
+                bgl_texture_2d(1),    // color (TAA output)
+                bgl_texture_2d(2),    // velocity
+                bgl_depth_texture(3), // depth
+                bgl_sampler(4),       // linear
+            ],
+        });
+        let dof_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("DOF BGL"),
+            entries: &[
+                bgl_uniform(0, wgpu::ShaderStages::FRAGMENT),  // DofUniforms
+                bgl_texture_2d(1),    // color (motion blur output)
+                bgl_depth_texture(2), // depth
+                bgl_sampler(3),       // linear
             ],
         });
 
@@ -687,6 +762,16 @@ impl Renderer {
             &[&vol_composite_bgl],
             &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
+        let motion_blur_pipeline = fullscreen_pipeline(
+            &device, &sh_motion_blur, "Motion Blur",
+            &[&motion_blur_bgl],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        );
+        let dof_pipeline = fullscreen_pipeline(
+            &device, &sh_dof, "DOF",
+            &[&dof_bgl],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        );
 
         let mut camera = Camera::new();
         camera.set_aspect(surface_config.width, surface_config.height);
@@ -706,6 +791,9 @@ impl Renderer {
             &ssr_bgl, &ssr_composite_bgl,
             &vol_bgl, &vol_composite_bgl,
             &bloom_h_buf, &bloom_v_buf,
+            &motion_blur_bgl, &dof_bgl,
+            &motion_blur_buffer, &dof_buffer, &color_grade_buffer,
+            &lut_view,
         );
 
         Ok(Self {
@@ -729,6 +817,9 @@ impl Renderer {
             cas_buffer,
             ssr_buffer,
             vol_buffer,
+            motion_blur_buffer,
+            dof_buffer,
+            color_grade_buffer,
             object_bgl,
             lighting_uniforms_bgl,
             lighting_inputs_bgl,
@@ -743,6 +834,8 @@ impl Renderer {
             ssr_composite_bgl,
             vol_bgl,
             vol_composite_bgl,
+            motion_blur_bgl,
+            dof_bgl,
             scene_bg,
             shadow_pass_bgs,
             lighting_uniforms_bg:  size_deps.lighting_uniforms_bg,
@@ -759,6 +852,8 @@ impl Renderer {
             ssr_composite_bg:      size_deps.ssr_composite_bg,
             vol_bg:                size_deps.vol_bg,
             vol_composite_bg:      size_deps.vol_composite_bg,
+            motion_blur_bg:        size_deps.motion_blur_bg,
+            dof_bg:                size_deps.dof_bg,
             gbuffer_albedo_view:   size_deps.gbuffer_albedo_view,
             gbuffer_normal_view:   size_deps.gbuffer_normal_view,
             gbuffer_depth_view:    size_deps.gbuffer_depth_view,
@@ -776,9 +871,12 @@ impl Renderer {
             ssr_view:              size_deps.ssr_view,
             ssr_hdr_view:          size_deps.ssr_hdr_view,
             vol_view:              size_deps.vol_view,
+            motion_blur_view:      size_deps.motion_blur_view,
+            dof_view:              size_deps.dof_view,
             shadow_array_view,
             shadow_cascade_views,
             noise_view,
+            lut_view,
             default_albedo_view,
             default_normal_view,
             default_mr_view,
@@ -801,6 +899,8 @@ impl Renderer {
             ssr_composite_pipeline,
             vol_pipeline,
             vol_composite_pipeline,
+            motion_blur_pipeline,
+            dof_pipeline,
         })
     }
 
@@ -836,6 +936,9 @@ impl Renderer {
             &self.ssr_bgl, &self.ssr_composite_bgl,
             &self.vol_bgl, &self.vol_composite_bgl,
             &self.bloom_h_buffer, &self.bloom_v_buffer,
+            &self.motion_blur_bgl, &self.dof_bgl,
+            &self.motion_blur_buffer, &self.dof_buffer, &self.color_grade_buffer,
+            &self.lut_view,
         );
         self.lighting_uniforms_bg = sd.lighting_uniforms_bg;
         self.lighting_inputs_bg   = sd.lighting_inputs_bg;
@@ -868,6 +971,10 @@ impl Renderer {
         self.ssr_view             = sd.ssr_view;
         self.ssr_hdr_view         = sd.ssr_hdr_view;
         self.vol_view             = sd.vol_view;
+        self.motion_blur_bg       = sd.motion_blur_bg;
+        self.dof_bg               = sd.dof_bg;
+        self.motion_blur_view     = sd.motion_blur_view;
+        self.dof_view             = sd.dof_view;
         self.taa_valid            = false;
     }
 
@@ -1100,6 +1207,32 @@ impl Renderer {
             _pad:         [0.0; 2],
         }));
 
+        // Update motion blur uniforms
+        self.queue.write_buffer(&self.motion_blur_buffer, 0, bytemuck::bytes_of(&MotionBlurUniforms {
+            viewport:     [w, h],
+            max_blur_px:  20.0,
+            sample_count: 16.0,
+        }));
+
+        // Update DOF uniforms
+        self.queue.write_buffer(&self.dof_buffer, 0, bytemuck::bytes_of(&DofUniforms {
+            viewport:       [w, h],
+            focal_distance: 8.0,
+            focal_range:    10.0,
+            bokeh_radius:   8.0,
+            near:           self.camera.near,
+            far:            self.camera.far,
+            _pad:           0.0,
+        }));
+
+        // Update colour grade uniforms (neutral defaults — identity with default LUT)
+        self.queue.write_buffer(&self.color_grade_buffer, 0, bytemuck::bytes_of(&ColorGradeUniforms {
+            exposure:     1.0,
+            saturation:   1.0,
+            contrast:     1.0,
+            lut_strength: 1.0,
+        }));
+
         // Update per-object uniforms with current prev_model, then advance prev_model
         for obj in &mut self.objects {
             let u = make_object_uniforms(&obj.info, obj.prev_model_matrix);
@@ -1315,7 +1448,37 @@ impl Renderer {
             },
         );
 
-        // ── 7. Bloom threshold (TAA output → bloom_ping) ─────────────────────
+        // ── 7. Motion Blur (taa_output → motion_blur_view) ──────────────────
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Motion Blur Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.motion_blur_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.motion_blur_pipeline);
+            pass.set_bind_group(0, &self.motion_blur_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ── 8. Depth of Field (motion_blur_view → dof_view) ─────────────────
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("DOF Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.dof_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.dof_pipeline);
+            pass.set_bind_group(0, &self.dof_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ── 9. Bloom threshold (DOF output → bloom_ping) ─────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Bloom Threshold"),
@@ -1330,7 +1493,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 8. Bloom blur H (bloom_ping → bloom_pong) ────────────────────────
+        // ── 10. Bloom blur H (bloom_ping → bloom_pong) ────────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Bloom Blur H"),
@@ -1345,7 +1508,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 9. Bloom blur V (bloom_pong → bloom_ping) ────────────────────────
+        // ── 11. Bloom blur V (bloom_pong → bloom_ping) ────────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Bloom Blur V"),
@@ -1360,7 +1523,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 10. Tonemap (TAA output + bloom_ping → LDR Rgba8Unorm) ────────────
+        // ── 12. Tonemap (DOF output + bloom_ping → LDR Rgba8Unorm) ────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Tonemap Pass"),
@@ -1375,7 +1538,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 11. CAS Sharpening (LDR → swapchain) ────────────────────────────────
+        // ── 13. CAS Sharpening (LDR → swapchain) ────────────────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("CAS Pass"),
@@ -1422,6 +1585,8 @@ struct SizeDependentResources {
     ssr_view:             wgpu::TextureView,
     ssr_hdr_view:         wgpu::TextureView,
     vol_view:             wgpu::TextureView,
+    motion_blur_view:     wgpu::TextureView,
+    dof_view:             wgpu::TextureView,
     lighting_uniforms_bg: wgpu::BindGroup,
     lighting_inputs_bg:   wgpu::BindGroup,
     ssao_bg:              wgpu::BindGroup,
@@ -1436,6 +1601,8 @@ struct SizeDependentResources {
     ssr_composite_bg:     wgpu::BindGroup,
     vol_bg:               wgpu::BindGroup,
     vol_composite_bg:     wgpu::BindGroup,
+    motion_blur_bg:       wgpu::BindGroup,
+    dof_bg:               wgpu::BindGroup,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1471,6 +1638,12 @@ impl SizeDependentResources {
         vol_composite_bgl:    &wgpu::BindGroupLayout,
         bloom_h_buf:          &wgpu::Buffer,
         bloom_v_buf:          &wgpu::Buffer,
+        motion_blur_bgl:      &wgpu::BindGroupLayout,
+        dof_bgl:              &wgpu::BindGroupLayout,
+        motion_blur_buf:      &wgpu::Buffer,
+        dof_buf:              &wgpu::Buffer,
+        color_grade_buf:      &wgpu::Buffer,
+        lut_view:             &wgpu::TextureView,
     ) -> Self {
         let w  = width.max(1);
         let h  = height.max(1);
@@ -1531,6 +1704,13 @@ impl SizeDependentResources {
         let taa_history_view    = taa_history_tex.create_view(&Default::default());
         let taa_output_view     = taa_output_tex.create_view(&Default::default());
 
+        // Motion Blur output (full-res Rgba16Float)
+        let motion_blur_tex  = tex2d(device, w, h, wgpu::TextureFormat::Rgba16Float, "Motion Blur");
+        let motion_blur_view = motion_blur_tex.create_view(&Default::default());
+        // DOF output (full-res Rgba16Float)
+        let dof_tex  = tex2d(device, w, h, wgpu::TextureFormat::Rgba16Float, "DOF");
+        let dof_view = dof_tex.create_view(&Default::default());
+
         let lighting_uniforms_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:   Some("Lighting Uniforms BG"),
             layout:  lighting_uniforms_bgl,
@@ -1578,7 +1758,8 @@ impl SizeDependentResources {
             label:   Some("Bloom Threshold BG"),
             layout:  bloom_threshold_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&taa_output_view) },
+                // After Phase C, bloom extracts bright regions from the DoF output
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&dof_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(linear_sampler) },
             ],
         });
@@ -1607,9 +1788,12 @@ impl SizeDependentResources {
             label:   Some("Tonemap BG"),
             layout:  tonemap_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&taa_output_view) },
+                // HDR input: DoF output (after motion blur + DoF)
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&dof_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&bloom_ping_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: color_grade_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(lut_view) },
             ],
         });
 
@@ -1697,11 +1881,38 @@ impl SizeDependentResources {
             ],
         });
 
+        // Motion Blur: reads taa_output + velocity + depth → motion_blur_view
+        let motion_blur_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("Motion Blur BG"),
+            layout:  motion_blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: motion_blur_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&taa_output_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&velocity_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+            ],
+        });
+
+        // DOF: reads motion_blur_view + depth → dof_view
+        let dof_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("DOF BG"),
+            layout:  dof_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: dof_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&motion_blur_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+            ],
+        });
+
         Self {
             gbuffer_albedo_view, gbuffer_normal_view, gbuffer_depth_view, velocity_view,
             hdr_view, ssao_view, ssao_blur_view, bloom_ping_view, bloom_pong_view, ldr_view,
             taa_history_view, taa_output_view, taa_history_tex, taa_output_tex,
             ssr_view, ssr_hdr_view, vol_view,
+            motion_blur_view, motion_blur_bg,
+            dof_view, dof_bg,
             lighting_uniforms_bg, lighting_inputs_bg, ssao_bg, ssao_blur_bg,
             bloom_threshold_bg, bloom_blur_h_bg, bloom_blur_v_bg, tonemap_bg, cas_bg, taa_bg,
             ssr_bg, ssr_composite_bg, vol_bg, vol_composite_bg,
@@ -1966,6 +2177,50 @@ fn bgl_comparison_sampler(binding: u32) -> wgpu::BindGroupLayoutEntry {
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
         count: None,
     }
+}
+
+fn bgl_texture_3d(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type:    wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D3,
+            multisampled:   false,
+        },
+        count: None,
+    }
+}
+
+/// Create a 32³ identity 3D LUT (each voxel maps to itself → no colour shift).
+fn create_identity_lut(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    const S: u32 = 32;
+    let mut data = vec![0u8; (S * S * S * 4) as usize];
+    for z in 0..S {
+        for y in 0..S {
+            for x in 0..S {
+                let idx = ((z * S + y) * S + x) as usize * 4;
+                data[idx]     = (x * 255 / (S - 1)) as u8;
+                data[idx + 1] = (y * 255 / (S - 1)) as u8;
+                data[idx + 2] = (z * 255 / (S - 1)) as u8;
+                data[idx + 3] = 255;
+            }
+        }
+    }
+    let tex = device.create_texture_with_data(queue, &wgpu::TextureDescriptor {
+        label:           Some("3D LUT"),
+        size:            wgpu::Extent3d { width: S, height: S, depth_or_array_layers: S },
+        mip_level_count: 1,
+        sample_count:    1,
+        dimension:       wgpu::TextureDimension::D3,
+        format:          wgpu::TextureFormat::Rgba8Unorm,
+        usage:           wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats:    &[],
+    }, wgpu::util::TextureDataOrder::LayerMajor, &data);
+    tex.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D3),
+        ..Default::default()
+    })
 }
 
 fn make_object_uniforms(info: &SceneObjectInfo, prev_model: Mat4) -> ObjectUniforms {
