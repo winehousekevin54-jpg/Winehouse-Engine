@@ -34,6 +34,7 @@ export function Hierarchy() {
   const engineStatus = useEditorStore((s) => s.engineStatus);
   const executeCommand = useEditorStore((s) => s.executeCommand);
   const pushCommand = useEditorStore((s) => s.pushCommand);
+  const addAsset = useEditorStore((s) => s.addAsset);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function handleAdd() {
@@ -59,6 +60,7 @@ export function Hierarchy() {
     await cmd.executeAsync();
     pushCommand(cmd);
     syncScene(setEntities);
+    addAsset({ id: `${Date.now()}-${name}`, name, type: 'gltf', data, sizeKb: Math.round(data.byteLength / 1024) });
   }
 
   function handleDelete(id: number) {

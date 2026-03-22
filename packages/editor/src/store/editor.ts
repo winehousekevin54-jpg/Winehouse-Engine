@@ -2,6 +2,14 @@ import { create } from 'zustand';
 import type { Command } from '../commands';
 import type { SceneObjectInfo } from '../bridge/EngineAPI';
 
+export interface AssetEntry {
+  id: string;       // unique asset id (uuid-ish)
+  name: string;
+  type: 'gltf';
+  data: Uint8Array; // raw bytes — used to re-spawn on drag/double-click
+  sizeKb: number;
+}
+
 interface EditorState {
   // Scene
   entities: SceneObjectInfo[];
@@ -14,6 +22,9 @@ interface EditorState {
   // Console
   logs: string[];
 
+  // Asset library
+  assets: AssetEntry[];
+
   // Undo / Redo
   undoStack: Command[];
   redoStack: Command[];
@@ -23,6 +34,7 @@ interface EditorState {
   selectEntity: (id: number | null) => void;
   setEngineStatus: (status: 'loading' | 'running' | 'error', error?: string) => void;
   addLog: (message: string) => void;
+  addAsset: (asset: AssetEntry) => void;
 
   executeCommand: (cmd: Command, setEntities: (e: SceneObjectInfo[]) => void) => void;
   pushCommand: (cmd: Command) => void;
@@ -36,6 +48,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   engineStatus: 'loading',
   engineError: null,
   logs: [],
+  assets: [],
   undoStack: [],
   redoStack: [],
 
@@ -47,6 +60,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => ({
       logs: [...state.logs.slice(-499), `[${new Date().toLocaleTimeString()}] ${message}`],
     })),
+  addAsset: (asset) =>
+    set((state) => ({ assets: [...state.assets, asset] })),
 
   executeCommand: (cmd, setEntities) => {
     cmd.execute();

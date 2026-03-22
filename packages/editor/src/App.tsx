@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 import { initEngine, getSceneObjects } from './bridge/EngineAPI';
 import { useEditorStore } from './store/editor';
 import { syncScene } from './commands';
@@ -7,8 +7,10 @@ import { SceneView } from './panels/SceneView';
 import { Hierarchy } from './panels/Hierarchy';
 import { Inspector } from './panels/Inspector';
 import { Console } from './panels/Console';
+import { ProjectBrowser } from './panels/ProjectBrowser';
 
 export function App() {
+  const [bottomTab, setBottomTab] = useState<'console' | 'project'>('console');
   const engineStatus = useEditorStore((s) => s.engineStatus);
   const engineError = useEditorStore((s) => s.engineError);
   const setEngineStatus = useEditorStore((s) => s.setEngineStatus);
@@ -150,9 +152,43 @@ export function App() {
           </div>
         </div>
 
-        {/* Console */}
-        <div style={{ height: 140, flexShrink: 0, borderTop: '1px solid #2a2a3a' }}>
-          <Console />
+        {/* Bottom panel with tabs */}
+        <div style={{ height: 160, flexShrink: 0, borderTop: '1px solid #2a2a3a', display: 'flex', flexDirection: 'column' }}>
+          {/* Tab bar */}
+          <div style={{
+            height: 28, flexShrink: 0,
+            background: '#16161e',
+            borderBottom: '1px solid #2a2a3a',
+            display: 'flex', alignItems: 'flex-end',
+            paddingLeft: 8, gap: 2,
+          }}>
+            {(['console', 'project'] as const).map((tab) => (
+              <div
+                key={tab}
+                onClick={() => setBottomTab(tab)}
+                style={{
+                  padding: '4px 12px',
+                  fontSize: 11, fontWeight: 600,
+                  letterSpacing: '0.06em',
+                  color: bottomTab === tab ? '#c0c0e0' : '#505060',
+                  background: bottomTab === tab ? '#13131a' : 'transparent',
+                  borderTop: bottomTab === tab ? '1px solid #2a2a3a' : '1px solid transparent',
+                  borderLeft: bottomTab === tab ? '1px solid #2a2a3a' : '1px solid transparent',
+                  borderRight: bottomTab === tab ? '1px solid #2a2a3a' : '1px solid transparent',
+                  borderRadius: '4px 4px 0 0',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                  marginBottom: bottomTab === tab ? -1 : 0,
+                }}
+              >
+                {tab.toUpperCase()}
+              </div>
+            ))}
+          </div>
+          {/* Tab content */}
+          <div style={{ flex: 1, overflow: 'hidden' }}>
+            {bottomTab === 'console' ? <Console /> : <ProjectBrowser />}
+          </div>
         </div>
       </div>
     </div>
