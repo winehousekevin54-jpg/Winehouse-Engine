@@ -67,14 +67,15 @@ fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
 }
 
 // ── PCF Shadow (3×3 kernel) ───────────────────────────────────────────────────
+// NOTE: No early-return inside this function — textureSampleCompare requires
+// uniform control flow. Use select() for bounds check instead.
 
 fn pcf_shadow(world_pos: vec3<f32>) -> f32 {
     let light_clip = lighting.light_view_proj * vec4<f32>(world_pos, 1.0);
     let proj       = light_clip.xyz / light_clip.w;
 
-    // Map from NDC [-1,1] / [0,1] to UV [0,1]; flip Y
+    // Map from NDC [-1,1] to UV [0,1]; flip Y
     let uv = vec2<f32>(proj.x * 0.5 + 0.5, 1.0 - (proj.y * 0.5 + 0.5));
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
 
     let depth    = proj.z - SHADOW_BIAS;
     let texel    = 1.0 / SHADOW_SIZE;
@@ -85,7 +86,9 @@ fn pcf_shadow(world_pos: vec3<f32>) -> f32 {
             shadow += textureSampleCompare(shadow_map, shadow_sampler, uv + offset, depth);
         }
     }
-    return shadow / 9.0;
+    // select() instead of early-return: avoids non-uniform control flow
+    let in_bounds = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
+    return select(1.0, shadow / 9.0, in_bounds);
 }
 
 // ── Fullscreen triangle vertex ─────────────────────────────────────────────────
@@ -108,15 +111,21 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let texel = vec2<i32>(frag_coord.xy);
 
     let depth = textureLoad(gbuffer_depth, texel, 0);
-    // Sky / background — return clear color
+
+    // Reconstruct world position before sky check (needed for pcf_shadow below)
+    let ndc       = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
+    let world_h   = lighting.inv_view_proj * ndc;
+    let world_pos = world_h.xyz / world_h.w;
+
+    // textureSample and textureSampleCompare MUST be called before any non-uniform
+    // branch (WGSL uniform control flow requirement).
+    let ssao   = textureSample(ssao_tex, linear_sampler, uv).r;
+    let shadow = pcf_shadow(world_pos);
+
+    // Sky / background — return after texture calls to satisfy uniform control flow
     if (depth >= 1.0) {
         return vec4<f32>(0.07, 0.07, 0.10, 1.0);
     }
-
-    // ── Reconstruct world position from depth ───────────────────────────────────
-    let ndc     = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
-    let world_h = lighting.inv_view_proj * ndc;
-    let world_pos = world_h.xyz / world_h.w;
 
     // ── Sample G-Buffer ─────────────────────────────────────────────────────────
     let albedo_rough  = textureLoad(gbuffer_albedo, texel, 0);
@@ -126,9 +135,6 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let roughness = albedo_rough.a;
     let N         = normalize(normal_metal.rgb * 2.0 - 1.0);
     let metallic  = normal_metal.a;
-
-    // ── SSAO ────────────────────────────────────────────────────────────────────
-    let ssao = textureSample(ssao_tex, linear_sampler, uv).r;
 
     // ── PBR Shading ─────────────────────────────────────────────────────────────
     let V  = normalize(scene.camera_pos - world_pos);
@@ -147,7 +153,6 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let denom    = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
     let specular = (NDF * G * F) / denom;
 
-    let shadow  = pcf_shadow(world_pos);
     let Lo      = (kD * albedo / PI + specular) * scene.light_color * NdotL * shadow;
     let ambient = scene.ambient_color * albedo * ssao;
 

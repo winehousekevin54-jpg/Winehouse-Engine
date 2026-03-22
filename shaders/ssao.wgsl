@@ -71,15 +71,16 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let texel = vec2<i32>(frag_coord.xy);
     let depth = textureLoad(gbuffer_depth, texel, 0);
 
+    // textureSample MUST be called before any non-uniform branch (WGSL rule).
+    // Call it here unconditionally, then do the sky check below.
+    let noise_scale = lighting.viewport / 4.0;
+    let random_vec  = textureSample(noise_tex, repeat_sampler, uv * noise_scale).xyz * 2.0 - 1.0;
+
     // Sky: no occlusion
     if (depth >= 1.0) { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
 
     let world_pos = reconstruct_world(uv, depth);
     let normal    = normalize(textureLoad(gbuffer_normal, texel, 0).rgb * 2.0 - 1.0);
-
-    // Random rotation vector from tiling noise texture
-    let noise_scale = lighting.viewport / 4.0;
-    let random_vec  = textureSample(noise_tex, repeat_sampler, uv * noise_scale).xyz * 2.0 - 1.0;
 
     // Build TBN to orient kernel along surface normal
     let tangent   = normalize(random_vec - normal * dot(random_vec, normal));
