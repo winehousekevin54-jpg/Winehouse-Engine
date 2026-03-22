@@ -10,25 +10,28 @@ use crate::mesh::{vertex_buffer_layout, GpuMesh, Vertex};
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SceneUniforms {
-    view_proj:     [[f32; 4]; 4],
-    camera_pos:    [f32; 3],
-    _pad0:         f32,
-    light_dir:     [f32; 3],
-    _pad1:         f32,
-    light_color:   [f32; 3],
-    _pad2:         f32,
-    ambient_color: [f32; 3],
-    _pad3:         f32,
+    view_proj:             [[f32; 4]; 4],
+    unjittered_view_proj:  [[f32; 4]; 4],
+    prev_view_proj:        [[f32; 4]; 4],
+    camera_pos:            [f32; 3],
+    _pad0:                 f32,
+    light_dir:             [f32; 3],
+    _pad1:                 f32,
+    light_color:           [f32; 3],
+    _pad2:                 f32,
+    ambient_color:         [f32; 3],
+    _pad3:                 f32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ObjectUniforms {
-    model:     [[f32; 4]; 4],
-    albedo:    [f32; 4],
-    metallic:  f32,
-    roughness: f32,
-    _pad:      [f32; 2],
+    model:      [[f32; 4]; 4],
+    prev_model: [[f32; 4]; 4],
+    albedo:     [f32; 4],
+    metallic:   f32,
+    roughness:  f32,
+    _pad:       [f32; 2],
 }
 
 #[repr(C)]
@@ -55,6 +58,15 @@ struct BloomUniforms {
     texel_size: [f32; 2],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct TaaUniforms {
+    viewport:     [f32; 2],
+    jitter:       [f32; 2],
+    blend_factor: f32,
+    _pad:         [f32; 3],
+}
+
 // ── Scene object ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -70,10 +82,11 @@ pub struct SceneObjectInfo {
 }
 
 pub struct SceneObject {
-    pub info:             SceneObjectInfo,
-    pub mesh:             GpuMesh,
-    pub object_buffer:    wgpu::Buffer,
+    pub info:              SceneObjectInfo,
+    pub mesh:              GpuMesh,
+    pub object_buffer:     wgpu::Buffer,
     pub object_bind_group: wgpu::BindGroup,
+    pub prev_model_matrix: Mat4,
 }
 
 impl SceneObject {
@@ -99,6 +112,11 @@ pub struct Renderer {
     // Light
     light_view_proj: Mat4,
 
+    // TAA state
+    frame_index:    u32,
+    prev_view_proj: Mat4,
+    taa_valid:      bool,
+
     // Uniform buffers (updated each frame)
     scene_buffer:    wgpu::Buffer,
     shadow_buffer:   wgpu::Buffer,
@@ -107,6 +125,9 @@ pub struct Renderer {
     // Bloom uniform buffers (fixed direction)
     bloom_h_buffer:  wgpu::Buffer,
     bloom_v_buffer:  wgpu::Buffer,
+
+    // TAA uniform buffer
+    taa_buffer:      wgpu::Buffer,
 
     // Bind group layouts
     object_bgl:           wgpu::BindGroupLayout,
@@ -120,6 +141,7 @@ pub struct Renderer {
     bloom_blur_bgl:       wgpu::BindGroupLayout,
     tonemap_bgl:          wgpu::BindGroupLayout,
     fxaa_bgl:             wgpu::BindGroupLayout,
+    taa_bgl:              wgpu::BindGroupLayout,
 
     // Scene uniform bind group (shared across G-Buffer + shadow)
     scene_bg:         wgpu::BindGroup,
@@ -135,17 +157,23 @@ pub struct Renderer {
     bloom_blur_v_bg:      wgpu::BindGroup,
     tonemap_bg:           wgpu::BindGroup,
     fxaa_bg:              wgpu::BindGroup,
+    taa_bg:               wgpu::BindGroup,
 
     // Size-dependent textures
     gbuffer_albedo_view:    wgpu::TextureView,
     gbuffer_normal_view:    wgpu::TextureView,
     gbuffer_depth_view:     wgpu::TextureView,
+    velocity_view:          wgpu::TextureView,
     hdr_view:               wgpu::TextureView,
     ssao_view:              wgpu::TextureView,
     ssao_blur_view:         wgpu::TextureView,
     bloom_ping_view:        wgpu::TextureView,
     bloom_pong_view:        wgpu::TextureView,
     ldr_view:               wgpu::TextureView,
+    taa_history_view:       wgpu::TextureView,
+    taa_output_view:        wgpu::TextureView,
+    taa_history_tex:        wgpu::Texture,
+    taa_output_tex:         wgpu::Texture,
 
     // Fixed textures
     shadow_map_view:    wgpu::TextureView,
@@ -167,6 +195,7 @@ pub struct Renderer {
     bloom_blur_pipeline:       wgpu::RenderPipeline,
     tonemap_pipeline:          wgpu::RenderPipeline,
     fxaa_pipeline:             wgpu::RenderPipeline,
+    taa_pipeline:              wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -233,6 +262,7 @@ impl Renderer {
         let sh_bloom_bl = shader(&device, include_str!("../../../shaders/bloom_blur.wgsl"),      "Bloom Blur");
         let sh_tonemap  = shader(&device, include_str!("../../../shaders/tonemap.wgsl"),  "Tonemap");
         let sh_fxaa     = shader(&device, include_str!("../../../shaders/fxaa.wgsl"),     "FXAA");
+        let sh_taa      = shader(&device, include_str!("../../../shaders/taa.wgsl"),      "TAA");
 
         // ── Samplers ───────────────────────────────────────────────────────────
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -267,6 +297,7 @@ impl Renderer {
         let scene_buffer    = uniform_buf(&device, std::mem::size_of::<SceneUniforms>(),    "Scene");
         let shadow_buffer   = uniform_buf(&device, std::mem::size_of::<ShadowUniforms>(),   "Shadow");
         let lighting_buffer = uniform_buf(&device, std::mem::size_of::<LightingUniforms>(), "Lighting");
+        let taa_buffer      = uniform_buf(&device, std::mem::size_of::<TaaUniforms>(),      "TAA");
 
         let w2 = width.max(2) / 2;
         let h2 = height.max(2) / 2;
@@ -352,6 +383,17 @@ impl Renderer {
             label:   Some("FXAA BGL"),
             entries: &[bgl_texture_2d(0), bgl_sampler(1)],
         });
+        let taa_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("TAA BGL"),
+            entries: &[
+                bgl_uniform(0, wgpu::ShaderStages::FRAGMENT),
+                bgl_texture_2d(1),
+                bgl_texture_2d(2),
+                bgl_texture_2d(3),
+                bgl_depth_texture(4),
+                bgl_sampler(5),
+            ],
+        });
 
         // ── Fixed bind groups ──────────────────────────────────────────────────
         let scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -386,6 +428,7 @@ impl Renderer {
                     entry_point: Some("fs_main"),
                     targets:     &[
                         Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm,   blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                        Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float,  blend: None, write_mask: wgpu::ColorWrites::ALL }),
                         Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float,  blend: None, write_mask: wgpu::ColorWrites::ALL }),
                     ],
                     compilation_options: Default::default(),
@@ -484,6 +527,11 @@ impl Renderer {
             &[&fxaa_bgl],
             &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
         );
+        let taa_pipeline = fullscreen_pipeline(
+            &device, &sh_taa, "TAA",
+            &[&taa_bgl],
+            &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        );
 
         let mut camera = Camera::new();
         camera.set_aspect(surface_config.width, surface_config.height);
@@ -495,11 +543,11 @@ impl Renderer {
             &device, w, h, &linear_sampler, &repeat_sampler,
             &shadow_sampler, &point_sampler,
             &shadow_map_view, &noise_view,
-            &scene_buffer, &lighting_buffer,
+            &scene_buffer, &lighting_buffer, &taa_buffer,
             &lighting_uniforms_bgl, &lighting_inputs_bgl,
             &ssao_inputs_bgl, &ssao_blur_bgl,
             &bloom_threshold_bgl, &bloom_blur_bgl,
-            &tonemap_bgl, &fxaa_bgl,
+            &tonemap_bgl, &fxaa_bgl, &taa_bgl,
             &bloom_h_buf, &bloom_v_buf,
         );
 
@@ -512,11 +560,15 @@ impl Renderer {
             objects: Vec::new(),
             next_id: 1,
             light_view_proj,
+            frame_index: 0,
+            prev_view_proj: Mat4::IDENTITY,
+            taa_valid: false,
             scene_buffer,
             shadow_buffer,
             lighting_buffer,
             bloom_h_buffer: bloom_h_buf,
             bloom_v_buffer: bloom_v_buf,
+            taa_buffer,
             object_bgl,
             scene_bgl,
             shadow_pass_bgl,
@@ -528,6 +580,7 @@ impl Renderer {
             bloom_blur_bgl,
             tonemap_bgl,
             fxaa_bgl,
+            taa_bgl,
             scene_bg,
             shadow_pass_bg,
             lighting_uniforms_bg:  size_deps.lighting_uniforms_bg,
@@ -539,15 +592,21 @@ impl Renderer {
             bloom_blur_v_bg:       size_deps.bloom_blur_v_bg,
             tonemap_bg:            size_deps.tonemap_bg,
             fxaa_bg:               size_deps.fxaa_bg,
+            taa_bg:                size_deps.taa_bg,
             gbuffer_albedo_view:   size_deps.gbuffer_albedo_view,
             gbuffer_normal_view:   size_deps.gbuffer_normal_view,
             gbuffer_depth_view:    size_deps.gbuffer_depth_view,
+            velocity_view:         size_deps.velocity_view,
             hdr_view:              size_deps.hdr_view,
             ssao_view:             size_deps.ssao_view,
             ssao_blur_view:        size_deps.ssao_blur_view,
             bloom_ping_view:       size_deps.bloom_ping_view,
             bloom_pong_view:       size_deps.bloom_pong_view,
             ldr_view:              size_deps.ldr_view,
+            taa_history_view:      size_deps.taa_history_view,
+            taa_output_view:       size_deps.taa_output_view,
+            taa_history_tex:       size_deps.taa_history_tex,
+            taa_output_tex:        size_deps.taa_output_tex,
             shadow_map_view,
             noise_view,
             linear_sampler,
@@ -563,6 +622,7 @@ impl Renderer {
             bloom_blur_pipeline,
             tonemap_pipeline,
             fxaa_pipeline,
+            taa_pipeline,
         })
     }
 
@@ -590,11 +650,11 @@ impl Renderer {
             &self.linear_sampler, &self.repeat_sampler,
             &self.shadow_sampler, &self.point_sampler,
             &self.shadow_map_view, &self.noise_view,
-            &self.scene_buffer, &self.lighting_buffer,
+            &self.scene_buffer, &self.lighting_buffer, &self.taa_buffer,
             &self.lighting_uniforms_bgl, &self.lighting_inputs_bgl,
             &self.ssao_inputs_bgl, &self.ssao_blur_bgl,
             &self.bloom_threshold_bgl, &self.bloom_blur_bgl,
-            &self.tonemap_bgl, &self.fxaa_bgl,
+            &self.tonemap_bgl, &self.fxaa_bgl, &self.taa_bgl,
             &self.bloom_h_buffer, &self.bloom_v_buffer,
         );
         self.lighting_uniforms_bg = sd.lighting_uniforms_bg;
@@ -606,15 +666,22 @@ impl Renderer {
         self.bloom_blur_v_bg      = sd.bloom_blur_v_bg;
         self.tonemap_bg           = sd.tonemap_bg;
         self.fxaa_bg              = sd.fxaa_bg;
+        self.taa_bg               = sd.taa_bg;
         self.gbuffer_albedo_view  = sd.gbuffer_albedo_view;
         self.gbuffer_normal_view  = sd.gbuffer_normal_view;
         self.gbuffer_depth_view   = sd.gbuffer_depth_view;
+        self.velocity_view        = sd.velocity_view;
         self.hdr_view             = sd.hdr_view;
         self.ssao_view            = sd.ssao_view;
         self.ssao_blur_view       = sd.ssao_blur_view;
         self.bloom_ping_view      = sd.bloom_ping_view;
         self.bloom_pong_view      = sd.bloom_pong_view;
         self.ldr_view             = sd.ldr_view;
+        self.taa_history_view     = sd.taa_history_view;
+        self.taa_output_view      = sd.taa_output_view;
+        self.taa_history_tex      = sd.taa_history_tex;
+        self.taa_output_tex       = sd.taa_output_tex;
+        self.taa_valid            = false;
     }
 
     // ── Scene management ──────────────────────────────────────────────────────
@@ -649,7 +716,13 @@ impl Renderer {
     }
 
     fn push_object(&mut self, info: SceneObjectInfo, mesh: GpuMesh) {
-        let uniforms  = object_uniforms_from_info(&info);
+        let model = {
+            let t = Vec3::from(info.position);
+            let r = Quat::from_array(info.rotation);
+            let s = Vec3::from(info.scale);
+            Mat4::from_scale_rotation_translation(s, r, t)
+        };
+        let uniforms  = make_object_uniforms(&info, model);
         let buffer    = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Object Uniform"), contents: bytemuck::bytes_of(&uniforms),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -659,15 +732,20 @@ impl Renderer {
             layout:  &self.object_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
         });
-        self.objects.push(SceneObject { info, mesh, object_buffer: buffer, object_bind_group: bind_group });
+        self.objects.push(SceneObject {
+            info, mesh, object_buffer: buffer, object_bind_group: bind_group,
+            prev_model_matrix: model,
+        });
     }
 
     pub fn set_transform(&mut self, id: u64, position: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) {
         if let Some(obj) = self.objects.iter_mut().find(|o| o.info.id == id) {
+            // Save current model as prev before updating
+            obj.prev_model_matrix = obj.model_matrix();
             obj.info.position = position;
             obj.info.rotation = rotation;
             obj.info.scale    = scale;
-            let u = object_uniforms_from_info(&obj.info);
+            let u = make_object_uniforms(&obj.info, obj.prev_model_matrix);
             self.queue.write_buffer(&obj.object_buffer, 0, bytemuck::bytes_of(&u));
         }
     }
@@ -677,7 +755,7 @@ impl Renderer {
             obj.info.albedo   = albedo;
             obj.info.metallic = metallic;
             obj.info.roughness= roughness;
-            let u = object_uniforms_from_info(&obj.info);
+            let u = make_object_uniforms(&obj.info, obj.prev_model_matrix);
             self.queue.write_buffer(&obj.object_buffer, 0, bytemuck::bytes_of(&u));
         }
     }
@@ -694,26 +772,36 @@ impl Renderer {
     // ── Render ────────────────────────────────────────────────────────────────
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        use crate::camera::halton;
+
         let w = self.surface_config.width  as f32;
         let h = self.surface_config.height as f32;
-        let view_proj    = self.camera.view_proj();
-        let inv_vp       = view_proj.inverse();
+
+        // ── Jitter ────────────────────────────────────────────────────────
+        let ji = self.frame_index % 16;
+        let jx = (halton(ji + 1, 2) - 0.5) * 2.0 / w;
+        let jy = (halton(ji + 1, 3) - 0.5) * 2.0 / h;
+        let jittered_vp  = self.camera.jittered_view_proj(jx, jy);
+        let unjittered_vp = self.camera.view_proj();
+        let inv_vp       = unjittered_vp.inverse();
         let cam_pos      = self.camera.position();
 
         // Normalized light direction
         let light_dir_n = Vec3::new(-0.5_f32, -1.0, -0.3).normalize();
 
-        // Update scene uniforms
+        // Update scene uniforms (jittered VP for G-Buffer, unjittered for lighting/post)
         self.queue.write_buffer(&self.scene_buffer, 0, bytemuck::bytes_of(&SceneUniforms {
-            view_proj:     view_proj.to_cols_array_2d(),
-            camera_pos:    cam_pos.to_array(),
-            _pad0:         0.0,
-            light_dir:     light_dir_n.to_array(),
-            _pad1:         0.0,
-            light_color:   [1.2, 1.1, 1.0],
-            _pad2:         0.0,
-            ambient_color: [0.06, 0.06, 0.09],
-            _pad3:         0.0,
+            view_proj:            jittered_vp.to_cols_array_2d(),
+            unjittered_view_proj: unjittered_vp.to_cols_array_2d(),
+            prev_view_proj:       self.prev_view_proj.to_cols_array_2d(),
+            camera_pos:           cam_pos.to_array(),
+            _pad0:                0.0,
+            light_dir:            light_dir_n.to_array(),
+            _pad1:                0.0,
+            light_color:          [1.2, 1.1, 1.0],
+            _pad2:                0.0,
+            ambient_color:        [0.06, 0.06, 0.09],
+            _pad3:                0.0,
         }));
 
         // Update shadow uniforms
@@ -721,15 +809,35 @@ impl Renderer {
             light_view_proj: self.light_view_proj.to_cols_array_2d(),
         }));
 
-        // Update lighting uniforms
+        // Update lighting uniforms (use unjittered VP)
         self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&LightingUniforms {
             inv_view_proj:   inv_vp.to_cols_array_2d(),
             light_view_proj: self.light_view_proj.to_cols_array_2d(),
-            view_proj:       view_proj.to_cols_array_2d(),
+            view_proj:       unjittered_vp.to_cols_array_2d(),
             viewport:        [w, h],
             near:            self.camera.near,
             far:             self.camera.far,
         }));
+
+        // Update TAA uniforms
+        let blend = if self.taa_valid { 0.1_f32 } else { 1.0 };
+        self.queue.write_buffer(&self.taa_buffer, 0, bytemuck::bytes_of(&TaaUniforms {
+            viewport:     [w, h],
+            jitter:       [jx, jy],
+            blend_factor: blend,
+            _pad:         [0.0; 3],
+        }));
+
+        // Update per-object uniforms with current prev_model, then advance prev_model
+        for obj in &mut self.objects {
+            let u = make_object_uniforms(&obj.info, obj.prev_model_matrix);
+            self.queue.write_buffer(&obj.object_buffer, 0, bytemuck::bytes_of(&u));
+            // Advance: current model becomes next frame's prev_model
+            let t = Vec3::from(obj.info.position);
+            let r = Quat::from_array(obj.info.rotation);
+            let s = Vec3::from(obj.info.scale);
+            obj.prev_model_matrix = Mat4::from_scale_rotation_translation(s, r, t);
+        }
 
         let output  = self.surface.get_current_texture()?;
         let out_view = output.texture.create_view(&Default::default());
@@ -768,6 +876,10 @@ impl Renderer {
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.gbuffer_normal_view, resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.velocity_view, resolve_target: None,
                         ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
                     }),
                 ],
@@ -835,7 +947,43 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 6. Bloom threshold (HDR → bloom_ping) ────────────────────────────
+        // ── 6. TAA resolve (HDR + history → taa_output) ────────────────────────
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TAA Resolve"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.taa_output_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.taa_pipeline);
+            pass.set_bind_group(0, &self.taa_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Copy taa_output → taa_history for next frame
+        enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture:   &self.taa_output_tex,
+                mip_level: 0,
+                origin:    wgpu::Origin3d::ZERO,
+                aspect:    wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture:   &self.taa_history_tex,
+                mip_level: 0,
+                origin:    wgpu::Origin3d::ZERO,
+                aspect:    wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width:  self.surface_config.width.max(1),
+                height: self.surface_config.height.max(1),
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // ── 7. Bloom threshold (TAA output → bloom_ping) ─────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Bloom Threshold"),
@@ -850,7 +998,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 7. Bloom blur H (bloom_ping → bloom_pong) ────────────────────────
+        // ── 8. Bloom blur H (bloom_ping → bloom_pong) ────────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Bloom Blur H"),
@@ -865,7 +1013,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 8. Bloom blur V (bloom_pong → bloom_ping) ────────────────────────
+        // ── 9. Bloom blur V (bloom_pong → bloom_ping) ────────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Bloom Blur V"),
@@ -880,7 +1028,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 9. Tonemap (HDR + bloom_ping → LDR Rgba8Unorm) ───────────────────
+        // ── 10. Tonemap (TAA output + bloom_ping → LDR Rgba8Unorm) ────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Tonemap Pass"),
@@ -895,7 +1043,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // ── 10. FXAA (LDR → swapchain) ───────────────────────────────────────
+        // ── 11. FXAA (LDR → swapchain) ───────────────────────────────────────
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("FXAA Pass"),
@@ -912,6 +1060,12 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(enc.finish()));
         output.present();
+
+        // ── End-of-frame state updates ────────────────────────────────────
+        self.prev_view_proj = unjittered_vp;
+        self.frame_index += 1;
+        self.taa_valid = true;
+
         Ok(())
     }
 }
@@ -922,12 +1076,17 @@ struct SizeDependentResources {
     gbuffer_albedo_view:  wgpu::TextureView,
     gbuffer_normal_view:  wgpu::TextureView,
     gbuffer_depth_view:   wgpu::TextureView,
+    velocity_view:        wgpu::TextureView,
     hdr_view:             wgpu::TextureView,
     ssao_view:            wgpu::TextureView,
     ssao_blur_view:       wgpu::TextureView,
     bloom_ping_view:      wgpu::TextureView,
     bloom_pong_view:      wgpu::TextureView,
     ldr_view:             wgpu::TextureView,
+    taa_history_view:     wgpu::TextureView,
+    taa_output_view:      wgpu::TextureView,
+    taa_history_tex:      wgpu::Texture,
+    taa_output_tex:       wgpu::Texture,
     lighting_uniforms_bg: wgpu::BindGroup,
     lighting_inputs_bg:   wgpu::BindGroup,
     ssao_bg:              wgpu::BindGroup,
@@ -937,6 +1096,7 @@ struct SizeDependentResources {
     bloom_blur_v_bg:      wgpu::BindGroup,
     tonemap_bg:           wgpu::BindGroup,
     fxaa_bg:              wgpu::BindGroup,
+    taa_bg:               wgpu::BindGroup,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -953,6 +1113,7 @@ impl SizeDependentResources {
         noise_view:           &wgpu::TextureView,
         scene_buffer:         &wgpu::Buffer,
         lighting_buffer:      &wgpu::Buffer,
+        taa_buffer:           &wgpu::Buffer,
         lighting_uniforms_bgl:&wgpu::BindGroupLayout,
         lighting_inputs_bgl:  &wgpu::BindGroupLayout,
         ssao_inputs_bgl:      &wgpu::BindGroupLayout,
@@ -961,6 +1122,7 @@ impl SizeDependentResources {
         bloom_blur_bgl:       &wgpu::BindGroupLayout,
         tonemap_bgl:          &wgpu::BindGroupLayout,
         fxaa_bgl:             &wgpu::BindGroupLayout,
+        taa_bgl:              &wgpu::BindGroupLayout,
         bloom_h_buf:          &wgpu::Buffer,
         bloom_v_buf:          &wgpu::Buffer,
     ) -> Self {
@@ -972,6 +1134,7 @@ impl SizeDependentResources {
         let gbuffer_albedo = tex2d(device, w, h, wgpu::TextureFormat::Rgba8Unorm,  "GB Albedo");
         let gbuffer_normal = tex2d(device, w, h, wgpu::TextureFormat::Rgba16Float, "GB Normal");
         let gbuffer_depth  = depth_tex(device, w, h, "GB Depth");
+        let velocity       = tex2d(device, w, h, wgpu::TextureFormat::Rgba16Float, "Velocity");
         let hdr            = tex2d(device, w, h, wgpu::TextureFormat::Rgba16Float, "HDR");
         let ssao           = tex2d_r8(device, w, h, "SSAO");
         let ssao_blur      = tex2d_r8(device, w, h, "SSAO Blur");
@@ -979,6 +1142,30 @@ impl SizeDependentResources {
         let bloom_pong     = tex2d(device, w2, h2, wgpu::TextureFormat::Rgba16Float, "Bloom Pong");
         // LDR intermediate: tonemap writes here, FXAA reads from here
         let ldr            = tex2d(device, w, h, wgpu::TextureFormat::Rgba8Unorm, "LDR");
+
+        // TAA history & output need COPY_SRC/COPY_DST for end-of-frame blit
+        let taa_tex_usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST;
+        let taa_history_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label:  Some("TAA History"),
+            size:   wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format:    wgpu::TextureFormat::Rgba16Float,
+            usage:     taa_tex_usage,
+            view_formats: &[],
+        });
+        let taa_output_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label:  Some("TAA Output"),
+            size:   wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format:    wgpu::TextureFormat::Rgba16Float,
+            usage:     taa_tex_usage,
+            view_formats: &[],
+        });
 
         let gbuffer_albedo_view = gbuffer_albedo.create_view(&Default::default());
         let gbuffer_normal_view = gbuffer_normal.create_view(&Default::default());
@@ -988,12 +1175,15 @@ impl SizeDependentResources {
             aspect: wgpu::TextureAspect::DepthOnly,
             ..Default::default()
         });
+        let velocity_view       = velocity.create_view(&Default::default());
         let hdr_view            = hdr.create_view(&Default::default());
         let ssao_view           = ssao.create_view(&Default::default());
         let ssao_blur_view      = ssao_blur.create_view(&Default::default());
         let bloom_ping_view     = bloom_ping.create_view(&Default::default());
         let bloom_pong_view     = bloom_pong.create_view(&Default::default());
         let ldr_view            = ldr.create_view(&Default::default());
+        let taa_history_view    = taa_history_tex.create_view(&Default::default());
+        let taa_output_view     = taa_output_tex.create_view(&Default::default());
 
         let lighting_uniforms_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:   Some("Lighting Uniforms BG"),
@@ -1042,7 +1232,7 @@ impl SizeDependentResources {
             label:   Some("Bloom Threshold BG"),
             layout:  bloom_threshold_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hdr_view) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&taa_output_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(linear_sampler) },
             ],
         });
@@ -1071,7 +1261,7 @@ impl SizeDependentResources {
             label:   Some("Tonemap BG"),
             layout:  tonemap_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hdr_view) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&taa_output_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&bloom_ping_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(linear_sampler) },
             ],
@@ -1086,11 +1276,25 @@ impl SizeDependentResources {
             ],
         });
 
+        let taa_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("TAA BG"),
+            layout:  taa_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: taa_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&hdr_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&taa_history_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&velocity_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&gbuffer_depth_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(linear_sampler) },
+            ],
+        });
+
         Self {
-            gbuffer_albedo_view, gbuffer_normal_view, gbuffer_depth_view,
+            gbuffer_albedo_view, gbuffer_normal_view, gbuffer_depth_view, velocity_view,
             hdr_view, ssao_view, ssao_blur_view, bloom_ping_view, bloom_pong_view, ldr_view,
+            taa_history_view, taa_output_view, taa_history_tex, taa_output_tex,
             lighting_uniforms_bg, lighting_inputs_bg, ssao_bg, ssao_blur_bg,
-            bloom_threshold_bg, bloom_blur_h_bg, bloom_blur_v_bg, tonemap_bg, fxaa_bg,
+            bloom_threshold_bg, bloom_blur_h_bg, bloom_blur_v_bg, tonemap_bg, fxaa_bg, taa_bg,
         }
     }
 }
@@ -1287,17 +1491,18 @@ fn bgl_comparison_sampler(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn object_uniforms_from_info(info: &SceneObjectInfo) -> ObjectUniforms {
+fn make_object_uniforms(info: &SceneObjectInfo, prev_model: Mat4) -> ObjectUniforms {
     let t = Vec3::from(info.position);
     let r = Quat::from_array(info.rotation);
     let s = Vec3::from(info.scale);
     let model = Mat4::from_scale_rotation_translation(s, r, t);
     ObjectUniforms {
-        model:    model.to_cols_array_2d(),
-        albedo:   [info.albedo[0], info.albedo[1], info.albedo[2], 1.0],
-        metallic: info.metallic,
-        roughness: info.roughness,
-        _pad:     [0.0; 2],
+        model:      model.to_cols_array_2d(),
+        prev_model: prev_model.to_cols_array_2d(),
+        albedo:     [info.albedo[0], info.albedo[1], info.albedo[2], 1.0],
+        metallic:   info.metallic,
+        roughness:  info.roughness,
+        _pad:       [0.0; 2],
     }
 }
 

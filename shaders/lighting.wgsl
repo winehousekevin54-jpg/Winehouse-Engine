@@ -5,15 +5,17 @@
 // ============================================================
 
 struct SceneUniforms {
-    view_proj:     mat4x4<f32>,
-    camera_pos:    vec3<f32>,
-    _pad0:         f32,
-    light_dir:     vec3<f32>,
-    _pad1:         f32,
-    light_color:   vec3<f32>,
-    _pad2:         f32,
-    ambient_color: vec3<f32>,
-    _pad3:         f32,
+    view_proj:            mat4x4<f32>,
+    unjittered_view_proj: mat4x4<f32>,
+    prev_view_proj:       mat4x4<f32>,
+    camera_pos:           vec3<f32>,
+    _pad0:                f32,
+    light_dir:            vec3<f32>,
+    _pad1:                f32,
+    light_color:          vec3<f32>,
+    _pad2:                f32,
+    ambient_color:        vec3<f32>,
+    _pad3:                f32,
 }
 
 struct LightingUniforms {

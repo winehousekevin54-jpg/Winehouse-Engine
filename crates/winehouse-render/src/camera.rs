@@ -1,5 +1,18 @@
 use glam::{Mat4, Vec3};
 
+/// Halton low-discrepancy sequence value for the given index and base.
+pub fn halton(index: u32, base: u32) -> f32 {
+    let mut f = 1.0_f32;
+    let mut r = 0.0_f32;
+    let mut i = index;
+    while i > 0 {
+        f /= base as f32;
+        r += f * (i % base) as f32;
+        i /= base;
+    }
+    r
+}
+
 pub struct Camera {
     pub azimuth: f32,   // horizontal rotation (radians)
     pub elevation: f32, // vertical rotation (radians)
@@ -44,6 +57,17 @@ impl Camera {
 
     pub fn view_proj(&self) -> Mat4 {
         self.proj_matrix() * self.view_matrix()
+    }
+
+    /// Returns a view-proj matrix with sub-pixel jitter applied to the projection.
+    /// `jitter_x` and `jitter_y` are in NDC units (±2/width, ±2/height range).
+    pub fn jittered_view_proj(&self, jitter_x: f32, jitter_y: f32) -> Mat4 {
+        let mut proj = self.proj_matrix();
+        // Column-major: z_axis = column 2. Adding to x,y of column 2
+        // shifts the projection center by a sub-pixel amount.
+        proj.z_axis.x += jitter_x;
+        proj.z_axis.y += jitter_y;
+        proj * self.view_matrix()
     }
 
     pub fn orbit(&mut self, delta_az: f32, delta_el: f32) {
