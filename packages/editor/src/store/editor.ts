@@ -24,6 +24,8 @@ interface EditorState {
 
   // Asset library
   assets: AssetEntry[];
+  // maps assetId → list of scene entity ids spawned from that asset
+  assetSpawns: Record<string, number[]>;
 
   // Undo / Redo
   undoStack: Command[];
@@ -35,6 +37,9 @@ interface EditorState {
   setEngineStatus: (status: 'loading' | 'running' | 'error', error?: string) => void;
   addLog: (message: string) => void;
   addAsset: (asset: AssetEntry) => void;
+  trackSpawn: (assetId: string, entityId: number) => void;
+  updateAsset: (assetId: string, data: Uint8Array, sizeKb: number) => void;
+  clearSpawns: (assetId: string) => void;
 
   executeCommand: (cmd: Command, setEntities: (e: SceneObjectInfo[]) => void) => void;
   pushCommand: (cmd: Command) => void;
@@ -49,6 +54,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   engineError: null,
   logs: [],
   assets: [],
+  assetSpawns: {},
   undoStack: [],
   redoStack: [],
 
@@ -62,6 +68,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     })),
   addAsset: (asset) =>
     set((state) => ({ assets: [...state.assets, asset] })),
+  trackSpawn: (assetId, entityId) =>
+    set((state) => ({
+      assetSpawns: {
+        ...state.assetSpawns,
+        [assetId]: [...(state.assetSpawns[assetId] ?? []), entityId],
+      },
+    })),
+  updateAsset: (assetId, data, sizeKb) =>
+    set((state) => ({
+      assets: state.assets.map((a) =>
+        a.id === assetId ? { ...a, data, sizeKb } : a
+      ),
+    })),
+  clearSpawns: (assetId) =>
+    set((state) => ({
+      assetSpawns: { ...state.assetSpawns, [assetId]: [] },
+    })),
 
   executeCommand: (cmd, setEntities) => {
     cmd.execute();

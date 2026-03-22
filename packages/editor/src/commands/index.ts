@@ -122,7 +122,7 @@ export class SetMaterialCommand implements Command {
 
 export class LoadGltfCommand implements Command {
   readonly description: string;
-  private spawnedId: number = 0;
+  public spawnedId: number = 0;
 
   constructor(private data: Uint8Array, private name: string) {
     this.description = `Import "${name}"`;

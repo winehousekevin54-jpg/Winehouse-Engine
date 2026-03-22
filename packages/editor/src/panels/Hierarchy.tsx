@@ -35,6 +35,7 @@ export function Hierarchy() {
   const executeCommand = useEditorStore((s) => s.executeCommand);
   const pushCommand = useEditorStore((s) => s.pushCommand);
   const addAsset = useEditorStore((s) => s.addAsset);
+  const trackSpawn = useEditorStore((s) => s.trackSpawn);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function handleAdd() {
@@ -56,11 +57,13 @@ export function Hierarchy() {
     const buffer = await file.arrayBuffer();
     const data = new Uint8Array(buffer);
     const name = file.name.replace(/\.(glb|gltf)$/i, '');
+    const assetId = `${Date.now()}-${name}`;
     const cmd = new LoadGltfCommand(data, name);
     await cmd.executeAsync();
     pushCommand(cmd);
     syncScene(setEntities);
-    addAsset({ id: `${Date.now()}-${name}`, name, type: 'gltf', data, sizeKb: Math.round(data.byteLength / 1024) });
+    addAsset({ id: assetId, name, type: 'gltf', data, sizeKb: Math.round(data.byteLength / 1024) });
+    trackSpawn(assetId, cmd.spawnedId);
   }
 
   function handleDelete(id: number) {
