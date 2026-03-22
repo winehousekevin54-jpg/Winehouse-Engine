@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
-use crate::mesh::{cube_indices, cube_vertices, vertex_buffer_layout, Vertex};
+use crate::mesh::{vertex_buffer_layout, GpuMesh, Vertex};
 
 // ── GPU uniform structs ──────────────────────────────────────────────────────
 
@@ -47,6 +47,7 @@ pub struct SceneObjectInfo {
 
 pub struct SceneObject {
     pub info: SceneObjectInfo,
+    pub mesh: GpuMesh,
     pub object_buffer: wgpu::Buffer,
     pub object_bind_group: wgpu::BindGroup,
 }
@@ -79,11 +80,6 @@ pub struct Renderer {
     depth_view: wgpu::TextureView,
     msaa_texture: wgpu::Texture,
     msaa_view: wgpu::TextureView,
-
-    // Static geometry (cube shared for all objects for now)
-    cube_vertex_buffer: wgpu::Buffer,
-    cube_index_buffer: wgpu::Buffer,
-    cube_index_count: u32,
 
     pub objects: Vec<SceneObject>,
     pub next_id: u64,
@@ -237,20 +233,6 @@ impl Renderer {
             cache: None,
         });
 
-        // Cube geometry
-        let verts = cube_vertices();
-        let idxs = cube_indices();
-        let cube_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Cube VB"),
-            contents: bytemuck::cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let cube_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Cube IB"),
-            contents: bytemuck::cast_slice(&idxs),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
         let mut camera = Camera::new();
         camera.set_aspect(surface_config.width, surface_config.height);
 
@@ -268,9 +250,6 @@ impl Renderer {
             depth_view,
             msaa_texture,
             msaa_view,
-            cube_vertex_buffer,
-            cube_index_buffer,
-            cube_index_count: idxs.len() as u32,
             objects: Vec::new(),
             next_id: 1,
         })
@@ -307,6 +286,7 @@ impl Renderer {
             roughness: 0.5,
         };
 
+        let mesh = GpuMesh::from_cube(&self.device);
         let obj_uniforms = object_uniforms_from_info(&info);
         let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Object Uniform"),
@@ -319,8 +299,41 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
         });
 
-        self.objects.push(SceneObject { info, object_buffer: buffer, object_bind_group: bind_group });
+        self.objects.push(SceneObject { info, mesh, object_buffer: buffer, object_bind_group: bind_group });
         id
+    }
+
+    pub fn load_gltf(&mut self, data: &[u8], name: &str) -> Result<u64, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let mesh = GpuMesh::from_gltf_bytes(&self.device, data)?;
+
+        let info = SceneObjectInfo {
+            id,
+            name: name.to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+            albedo: [0.8, 0.8, 0.8],
+            metallic: 0.0,
+            roughness: 0.5,
+        };
+
+        let obj_uniforms = object_uniforms_from_info(&info);
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Object Uniform"),
+            contents: bytemuck::bytes_of(&obj_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Object BG"),
+            layout: &self.object_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        });
+
+        self.objects.push(SceneObject { info, mesh, object_buffer: buffer, object_bind_group: bind_group });
+        Ok(id)
     }
 
     pub fn set_transform(
@@ -405,12 +418,12 @@ impl Renderer {
 
             pass.set_pipeline(&self.render_pipeline);
             pass.set_bind_group(0, &self.scene_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.cube_vertex_buffer.slice(..));
-            pass.set_index_buffer(self.cube_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
             for obj in &self.objects {
                 pass.set_bind_group(1, &obj.object_bind_group, &[]);
-                pass.draw_indexed(0..self.cube_index_count, 0, 0..1);
+                pass.set_vertex_buffer(0, obj.mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(obj.mesh.index_buffer.slice(..), obj.mesh.index_format);
+                pass.draw_indexed(0..obj.mesh.index_count, 0, 0..1);
             }
         }
 
@@ -472,5 +485,4 @@ fn object_uniforms_from_info(info: &SceneObjectInfo) -> ObjectUniforms {
     }
 }
 
-// Suppress unused import warning for Vertex (used in mesh.rs only via bytemuck)
 const _: fn() = || { let _ = std::mem::size_of::<Vertex>(); };

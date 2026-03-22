@@ -1,5 +1,6 @@
+import { useRef } from 'react';
 import { useEditorStore } from '../store/editor';
-import { SpawnCubeCommand, DespawnCommand, syncScene } from '../commands';
+import { SpawnCubeCommand, DespawnCommand, LoadGltfCommand, syncScene } from '../commands';
 
 const PANEL: React.CSSProperties = {
   width: '100%',
@@ -32,6 +33,8 @@ export function Hierarchy() {
   const setEntities = useEditorStore((s) => s.setEntities);
   const engineStatus = useEditorStore((s) => s.engineStatus);
   const executeCommand = useEditorStore((s) => s.executeCommand);
+  const pushCommand = useEditorStore((s) => s.pushCommand);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   function handleAdd() {
     if (engineStatus !== 'running') return;
@@ -42,6 +45,19 @@ export function Hierarchy() {
       [Math.random(), Math.random(), Math.random()],
     );
     executeCommand(cmd, () => syncScene(setEntities));
+    syncScene(setEntities);
+  }
+
+  async function handleGltfFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || engineStatus !== 'running') return;
+    e.target.value = '';
+    const buffer = await file.arrayBuffer();
+    const data = new Uint8Array(buffer);
+    const name = file.name.replace(/\.(glb|gltf)$/i, '');
+    const cmd = new LoadGltfCommand(data, name);
+    await cmd.executeAsync();
+    pushCommand(cmd);
     syncScene(setEntities);
   }
 
@@ -58,16 +74,33 @@ export function Hierarchy() {
     <div style={PANEL}>
       <div style={HEADER}>
         HIERARCHY
-        <button
-          onClick={handleAdd}
-          title="Add Cube"
-          style={{
-            marginLeft: 'auto', marginRight: 6,
-            background: '#2a2a4a', border: '1px solid #3a3a5a',
-            color: '#a0a0c0', borderRadius: 3, cursor: 'pointer',
-            fontSize: 14, lineHeight: 1, padding: '1px 6px',
-          }}
-        >+</button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4, marginRight: 6 }}>
+          <button
+            onClick={handleAdd}
+            title="Add Cube"
+            style={{
+              background: '#2a2a4a', border: '1px solid #3a3a5a',
+              color: '#a0a0c0', borderRadius: 3, cursor: 'pointer',
+              fontSize: 14, lineHeight: 1, padding: '1px 6px',
+            }}
+          >+</button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            title="Import .glb / .gltf"
+            style={{
+              background: '#2a2a4a', border: '1px solid #3a3a5a',
+              color: '#a0a0c0', borderRadius: 3, cursor: 'pointer',
+              fontSize: 10, lineHeight: 1, padding: '2px 5px',
+            }}
+          >GLB</button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".glb,.gltf"
+            style={{ display: 'none' }}
+            onChange={handleGltfFile}
+          />
+        </div>
       </div>
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {entities.map((e) => (

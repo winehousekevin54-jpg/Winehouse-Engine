@@ -1,3 +1,6 @@
+use glam::Vec3;
+use wgpu::util::DeviceExt;
+
 /// Vertex: position (xyz) + normal (xyz)
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -6,7 +9,98 @@ pub struct Vertex {
     pub normal: [f32; 3],
 }
 
-/// Unit cube with per-face normals (24 verts, 36 indices)
+/// Owned GPU buffers for a single mesh.
+pub struct GpuMesh {
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub index_count: u32,
+    pub index_format: wgpu::IndexFormat,
+}
+
+impl GpuMesh {
+    /// Unit cube (24 verts / 36 u16 indices, per-face normals).
+    pub fn from_cube(device: &wgpu::Device) -> Self {
+        let verts = cube_vertices();
+        let idxs = cube_indices();
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Cube VB"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Cube IB"),
+            contents: bytemuck::cast_slice(&idxs),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Self {
+            vertex_buffer,
+            index_buffer,
+            index_count: idxs.len() as u32,
+            index_format: wgpu::IndexFormat::Uint16,
+        }
+    }
+
+    /// Parse a GLB/glTF binary blob, extract the first primitive.
+    /// Flat normals are generated if the file has none.
+    pub fn from_gltf_bytes(device: &wgpu::Device, data: &[u8]) -> Result<Self, String> {
+        let (document, buffers, _) =
+            gltf::import_slice(data).map_err(|e| format!("glTF parse error: {e}"))?;
+
+        let gltf_mesh = document
+            .meshes()
+            .next()
+            .ok_or_else(|| "No mesh found in glTF".to_string())?;
+
+        let primitive = gltf_mesh
+            .primitives()
+            .next()
+            .ok_or_else(|| "No primitive found in mesh".to_string())?;
+
+        let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
+
+        let positions: Vec<[f32; 3]> = reader
+            .read_positions()
+            .ok_or_else(|| "Missing vertex positions".to_string())?
+            .collect();
+
+        let indices: Vec<u32> = match reader.read_indices() {
+            Some(iter) => iter.into_u32().collect(),
+            None => (0..positions.len() as u32).collect(),
+        };
+
+        let normals: Vec<[f32; 3]> = match reader.read_normals() {
+            Some(iter) => iter.collect(),
+            None => generate_flat_normals(&positions, &indices),
+        };
+
+        let vertices: Vec<Vertex> = positions
+            .iter()
+            .zip(normals.iter())
+            .map(|(p, n)| Vertex { position: *p, normal: *n })
+            .collect();
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("glTF VB"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("glTF IB"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        Ok(Self {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+            index_format: wgpu::IndexFormat::Uint32,
+        })
+    }
+}
+
+// ── Cube geometry ─────────────────────────────────────────────────────────────
+
 pub fn cube_vertices() -> Vec<Vertex> {
     [
         // Front +Z
@@ -71,4 +165,23 @@ pub fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
             },
         ],
     }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn generate_flat_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+    let mut normals = vec![[0.0f32; 3]; positions.len()];
+    for tri in indices.chunks(3) {
+        if tri.len() < 3 {
+            continue;
+        }
+        let p0 = Vec3::from(positions[tri[0] as usize]);
+        let p1 = Vec3::from(positions[tri[1] as usize]);
+        let p2 = Vec3::from(positions[tri[2] as usize]);
+        let n = (p1 - p0).cross(p2 - p0).normalize_or_zero().to_array();
+        normals[tri[0] as usize] = n;
+        normals[tri[1] as usize] = n;
+        normals[tri[2] as usize] = n;
+    }
+    normals
 }

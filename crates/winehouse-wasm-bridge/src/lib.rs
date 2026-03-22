@@ -97,6 +97,15 @@ pub fn camera_zoom(factor: f32) {
     with_renderer(|r| r.camera.zoom(factor));
 }
 
+/// Load a glTF/GLB file from raw bytes and spawn it as a scene object. Returns the entity id.
+#[wasm_bindgen]
+pub fn load_gltf_bytes(data: &[u8], name: &str) -> Result<u64, JsValue> {
+    with_renderer_ret(
+        |r| r.load_gltf(data, name).map_err(|e| JsValue::from_str(&e)),
+        Err(JsValue::from_str("Renderer not initialized")),
+    )
+}
+
 /// Return all scene objects as a JSON array string.
 #[wasm_bindgen]
 pub fn get_scene_json() -> String {

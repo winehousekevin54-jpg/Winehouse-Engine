@@ -1,6 +1,7 @@
 import {
   spawnCube,
   despawn,
+  loadGltfBytes,
   setTransform,
   setMaterial,
   getSceneObjects,
@@ -116,6 +117,25 @@ export class SetMaterialCommand implements Command {
   undo() {
     const b = this.before;
     setMaterial(this.id, b.albedo[0], b.albedo[1], b.albedo[2], b.metallic, b.roughness);
+  }
+}
+
+export class LoadGltfCommand implements Command {
+  readonly description: string;
+  private spawnedId: number = 0;
+
+  constructor(private data: Uint8Array, private name: string) {
+    this.description = `Import "${name}"`;
+  }
+
+  async executeAsync(): Promise<void> {
+    this.spawnedId = await loadGltfBytes(this.data, this.name);
+  }
+
+  execute() { /* async – use executeAsync */ }
+
+  undo() {
+    if (this.spawnedId !== 0) despawn(this.spawnedId);
   }
 }
 

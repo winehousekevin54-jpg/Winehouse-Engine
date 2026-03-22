@@ -56,6 +56,11 @@ export function setMaterial(
   wasm?.set_material(BigInt(id), r, g, b, metallic, roughness);
 }
 
+export async function loadGltfBytes(data: Uint8Array, name: string): Promise<number> {
+  const id: bigint = await wasm?.load_gltf_bytes(data, name) ?? 0n;
+  return Number(id);
+}
+
 export function cameraOrbit(deltaAzimuth: number, deltaElevation: number): void {
   wasm?.camera_orbit(deltaAzimuth, deltaElevation);
 }
