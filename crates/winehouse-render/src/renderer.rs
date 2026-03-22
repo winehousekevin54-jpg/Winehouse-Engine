@@ -26,12 +26,14 @@ pub struct SceneUniforms {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ObjectUniforms {
-    model:      [[f32; 4]; 4],
-    prev_model: [[f32; 4]; 4],
-    albedo:     [f32; 4],
-    metallic:   f32,
-    roughness:  f32,
-    _pad:       [f32; 2],
+    model:        [[f32; 4]; 4],
+    prev_model:   [[f32; 4]; 4],
+    albedo:       [f32; 4],
+    metallic:     f32,
+    roughness:    f32,
+    /// Alpha cutoff threshold: 0.0 = fully opaque, >0 = AlphaMask (fragment discard)
+    alpha_cutoff: f32,
+    _pad:         f32,
 }
 
 #[repr(C)]
@@ -133,14 +135,16 @@ struct ColorGradeUniforms {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SceneObjectInfo {
-    pub id:       u64,
-    pub name:     String,
-    pub position: [f32; 3],
-    pub rotation: [f32; 4],
-    pub scale:    [f32; 3],
-    pub albedo:   [f32; 3],
-    pub metallic: f32,
-    pub roughness: f32,
+    pub id:           u64,
+    pub name:         String,
+    pub position:     [f32; 3],
+    pub rotation:     [f32; 4],
+    pub scale:        [f32; 3],
+    pub albedo:       [f32; 3],
+    pub metallic:     f32,
+    pub roughness:    f32,
+    /// 0.0 = opaque, >0 = AlphaMask cutoff (fragment discard in GBuffer)
+    pub alpha_cutoff: f32,
 }
 
 pub struct SceneObject {
@@ -988,6 +992,7 @@ impl Renderer {
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: [1.0, 1.0, 1.0],
             albedo, metallic: 0.0, roughness: 0.5,
+            alpha_cutoff: 0.0,
         };
         let albedo_view = self.default_albedo_view.clone();
         let normal_view = self.default_normal_view.clone();
@@ -1024,18 +1029,22 @@ impl Renderer {
                 format!("{}_{}", name, i)
             };
 
-            // Use glTF material factors: base_color_factor tints the albedo,
-            // metallic/roughness_factor scale the MR texture (or the constant value
-            // when no MR texture is present). This makes materials match the glTF spec.
+            // Decompose the glTF node world transform into TRS for SceneObjectInfo.
+            // This restores the correct position/rotation/scale from the scene graph
+            // (previously all GLB meshes were placed at the origin — causing 2D overlap).
+            let world_mat = Mat4::from_cols_array_2d(&result.node_transform);
+            let (scale, rotation, translation) = world_mat.to_scale_rotation_translation();
+
             let bcf = result.base_color_factor;
             let info = SceneObjectInfo {
                 id, name: obj_name,
-                position: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale:    [1.0, 1.0, 1.0],
+                position: translation.to_array(),
+                rotation: rotation.to_array(),
+                scale:    scale.to_array(),
                 albedo:   [bcf[0], bcf[1], bcf[2]],
-                metallic: result.metallic_factor,
-                roughness: result.roughness_factor,
+                metallic:     result.metallic_factor,
+                roughness:    result.roughness_factor,
+                alpha_cutoff: result.alpha_cutoff,
             };
             self.push_object(info, result.mesh, &albedo_view, &normal_view, &mr_view);
         }
@@ -2234,12 +2243,13 @@ fn make_object_uniforms(info: &SceneObjectInfo, prev_model: Mat4) -> ObjectUnifo
     let s = Vec3::from(info.scale);
     let model = Mat4::from_scale_rotation_translation(s, r, t);
     ObjectUniforms {
-        model:      model.to_cols_array_2d(),
-        prev_model: prev_model.to_cols_array_2d(),
-        albedo:     [info.albedo[0], info.albedo[1], info.albedo[2], 1.0],
-        metallic:   info.metallic,
-        roughness:  info.roughness,
-        _pad:       [0.0; 2],
+        model:        model.to_cols_array_2d(),
+        prev_model:   prev_model.to_cols_array_2d(),
+        albedo:       [info.albedo[0], info.albedo[1], info.albedo[2], 1.0],
+        metallic:     info.metallic,
+        roughness:    info.roughness,
+        alpha_cutoff: info.alpha_cutoff,
+        _pad:         0.0,
     }
 }
 

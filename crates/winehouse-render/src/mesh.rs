@@ -1,4 +1,4 @@
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 /// Vertex: position (xyz) + normal (xyz) + uv (xy) + tangent (xyzw)
@@ -39,6 +39,12 @@ pub struct GltfLoadResult {
     pub metallic_factor: f32,
     /// glTF roughness_factor (default 1.0) — scalar multiplier for roughness channel
     pub roughness_factor: f32,
+    /// World-space transform matrix accumulated from the glTF scene node hierarchy.
+    /// Identity when the primitive is not attached to any node (fallback).
+    pub node_transform: [[f32; 4]; 4],
+    /// Alpha cutoff threshold for AlphaMask materials (0.0 = opaque / AlphaBlend).
+    /// Fragments whose albedo alpha < this value are discarded in the GBuffer pass.
+    pub alpha_cutoff: f32,
 }
 
 impl GpuMesh {
@@ -101,7 +107,45 @@ impl GpuMesh {
 
         let mut results = Vec::new();
 
-        for gltf_mesh in document.meshes() {
+        // ── Scene-graph traversal ─────────────────────────────────────────────
+        // Each glTF node can reference a mesh AND carries a transform that must
+        // be accumulated from parent → child to get the correct world position.
+        // Iterating document.meshes() directly ignores all node transforms and
+        // stacks every primitive at the origin, making the model look flat/2D.
+        let mut stack: Vec<(gltf::Node<'_>, Mat4)> = Vec::new();
+
+        // Start from the default scene's root nodes (fall back to all nodes)
+        let roots = document
+            .default_scene()
+            .or_else(|| document.scenes().next());
+        match roots {
+            Some(scene) => {
+                for node in scene.nodes() {
+                    stack.push((node, Mat4::IDENTITY));
+                }
+            }
+            None => {
+                // No scene defined: treat all document nodes as roots
+                for node in document.nodes() {
+                    stack.push((node, Mat4::IDENTITY));
+                }
+            }
+        }
+
+        while let Some((node, parent_world)) = stack.pop() {
+            // Accumulate local node transform into world space
+            let local  = Mat4::from_cols_array_2d(&node.transform().matrix());
+            let world  = parent_world * local;
+            let world_arr = world.to_cols_array_2d();
+
+            // Enqueue children with accumulated world transform
+            for child in node.children() {
+                stack.push((child, world));
+            }
+
+            // Only process nodes that own a mesh
+            let Some(gltf_mesh) = node.mesh() else { continue };
+
             for primitive in gltf_mesh.primitives() {
                 let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
 
@@ -170,6 +214,12 @@ impl GpuMesh {
                 let metallic_factor    = pbr.metallic_factor();
                 let roughness_factor   = pbr.roughness_factor();
 
+                // Alpha cutoff: >0 enables fragment discard in GBuffer pass
+                let alpha_cutoff = match material.alpha_mode() {
+                    gltf::material::AlphaMode::Mask => material.alpha_cutoff().unwrap_or(0.5),
+                    _ => 0.0,
+                };
+
                 results.push(GltfLoadResult {
                     mesh: GpuMesh {
                         vertex_buffer,
@@ -183,6 +233,8 @@ impl GpuMesh {
                     base_color_factor,
                     metallic_factor,
                     roughness_factor,
+                    node_transform: world_arr,
+                    alpha_cutoff,
                 });
             }
         }
